@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppLayout } from './layouts/AppLayout';
 import { DeliveryPage } from './pages/DeliveryPage';
+import { DashboardPage } from './pages/DashboardPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 
 export const App: React.FC = () => {
@@ -9,25 +10,13 @@ export const App: React.FC = () => {
     <BrowserRouter>
       <Routes>
         <Route element={<AppLayout />}>
-          {/* Default redirect to Delivery operations for Milestone 1 */}
-          <Route path="/" element={<Navigate to="/operations/deliveries" replace />} />
+          {/* Default redirect to Dashboard */}
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
 
-          {/* Core Milestone 1 Implemented Screen */}
+          {/* Implemented Core Screens */}
+          <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/operations/deliveries" element={<DeliveryPage />} />
           <Route path="/deliveries" element={<Navigate to="/operations/deliveries" replace />} />
-
-          {/* Placeholders for future milestones */}
-          <Route
-            path="/dashboard"
-            element={
-              <PlaceholderPage
-                title="StockSense Dashboard"
-                section="Overview"
-                description="Live real-time metrics, telemetry graphs, and warehouse node activity feeds."
-                icon="dashboard"
-              />
-            }
-          />
           <Route
             path="/operations"
             element={<Navigate to="/operations/deliveries" replace />}
