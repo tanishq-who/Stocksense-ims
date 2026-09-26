@@ -1,10 +1,19 @@
 import React, { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 
 export const Header: React.FC = () => {
   const location = useLocation();
+  const { user, logout } = useAuth();
   const [isOperationsOpen, setIsOperationsOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+
+  const getInitials = (name?: string) => {
+    if (!name) return 'OP';
+    const parts = name.trim().split(/\s+/);
+    if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  };
 
   const isOperationsActive = location.pathname.startsWith('/operations') || location.pathname === '/';
 
@@ -185,24 +194,28 @@ export const Header: React.FC = () => {
               className="flex items-center gap-space-sm pl-space-xs focus:outline-none rounded-lg hover:bg-surface-container-low p-1 transition-colors"
             >
               <div className="w-8 h-8 rounded-full bg-primary-fixed text-primary flex items-center justify-center font-semibold text-xs ring-1 ring-outline-variant/40">
-                DV
+                {getInitials(user?.name)}
               </div>
               <div className="hidden xl:flex flex-col text-left">
                 <span className="font-body-sm text-body-sm font-medium text-on-surface leading-tight">
-                  Devin Vance
+                  {user?.name || 'Warehouse Operator'}
                 </span>
                 <span className="font-label-code text-label-code text-on-surface-variant leading-tight text-[11px]">
-                  Lead Supervisor
+                  ID #{user?.id ?? '—'} &middot; Operator
                 </span>
               </div>
             </button>
 
             {/* Profile Dropdown */}
             {isProfileOpen && (
-              <div className="absolute right-0 top-full mt-2 w-48 bg-surface-container-lowest border border-outline-variant/30 rounded-xl shadow-lg py-1.5 z-50">
-                <div className="px-3 py-1.5 border-b border-surface-container mb-1">
-                  <div className="font-medium text-on-surface text-body-sm">Devin Vance</div>
-                  <div className="text-[11px] text-on-surface-variant font-mono">devin@stocksense.io</div>
+              <div className="absolute right-0 top-full mt-2 w-52 bg-surface-container-lowest border border-outline-variant/30 rounded-xl shadow-lg py-1.5 z-50">
+                <div className="px-3 py-2 border-b border-surface-container mb-1">
+                  <div className="font-medium text-on-surface text-body-sm truncate">
+                    {user?.name || 'Warehouse Operator'}
+                  </div>
+                  <div className="text-[11px] text-on-surface-variant font-mono truncate">
+                    {user?.email || 'operator@stocksense.io'}
+                  </div>
                 </div>
                 <NavLink
                   to="/profile"
@@ -223,8 +236,11 @@ export const Header: React.FC = () => {
                 <div className="border-t border-surface-container my-1" />
                 <button
                   type="button"
-                  onClick={() => setIsProfileOpen(false)}
-                  className="w-full text-left px-3 py-1.5 text-body-sm text-error hover:bg-surface-container flex items-center gap-2"
+                  onClick={() => {
+                    setIsProfileOpen(false);
+                    logout();
+                  }}
+                  className="w-full text-left px-3 py-1.5 text-body-sm text-error hover:bg-surface-container flex items-center gap-2 cursor-pointer"
                 >
                   <span className="material-symbols-outlined text-[16px]">logout</span>
                   <span>Sign Out</span>

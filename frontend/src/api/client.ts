@@ -27,16 +27,26 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
     }
   }
 
+  const token = typeof window !== 'undefined' ? localStorage.getItem('stocksense_token') : null;
+  const authHeaders: Record<string, string> = {};
+  if (token) {
+    authHeaders['Authorization'] = `Bearer ${token}`;
+  }
+
   const response = await fetch(url, {
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      ...authHeaders,
       ...headers,
     },
     ...rest,
   });
 
   if (!response.ok) {
+    if (response.status === 401 && token && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('stocksense:unauthorized'));
+    }
     const errorBody = await response.json().catch(() => ({}));
     let message = `HTTP ${response.status}: ${response.statusText}`;
 
