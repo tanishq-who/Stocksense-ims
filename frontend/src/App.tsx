@@ -7,6 +7,7 @@ import { ProductsPage } from './pages/ProductsPage';
 import { ReceiptsPage } from './pages/ReceiptsPage';
 import { TransfersPage } from './pages/TransfersPage';
 import { AdjustmentsPage } from './pages/AdjustmentsPage';
+import { MoveHistoryPage } from './pages/MoveHistoryPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 
 export const App: React.FC = () => {
@@ -32,17 +33,7 @@ export const App: React.FC = () => {
             element={<Navigate to="/operations/deliveries" replace />}
           />
           <Route path="/products" element={<ProductsPage />} />
-          <Route
-            path="/move-history"
-            element={
-              <PlaceholderPage
-                title="Stock Move History"
-                section="Audit"
-                description="Complete immutable ledger of all product movements, timestamps, handlers, and audit trails."
-                icon="history"
-              />
-            }
-          />
+          <Route path="/move-history" element={<MoveHistoryPage />} />
           <Route
             path="/settings"
             element={
