@@ -4,6 +4,7 @@ import { AppLayout } from './layouts/AppLayout';
 import { DeliveryPage } from './pages/DeliveryPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ProductsPage } from './pages/ProductsPage';
+import { ReceiptsPage } from './pages/ReceiptsPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 
 export const App: React.FC = () => {
@@ -18,20 +19,11 @@ export const App: React.FC = () => {
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/operations/deliveries" element={<DeliveryPage />} />
           <Route path="/deliveries" element={<Navigate to="/operations/deliveries" replace />} />
+          <Route path="/operations/receipts" element={<ReceiptsPage />} />
+          <Route path="/receipts" element={<Navigate to="/operations/receipts" replace />} />
           <Route
             path="/operations"
             element={<Navigate to="/operations/deliveries" replace />}
-          />
-          <Route
-            path="/operations/receipts"
-            element={
-              <PlaceholderPage
-                title="Inbound Receipts"
-                section="Operations"
-                description="Manage incoming purchase orders, dock staging, supplier receipts, and pallet intake."
-                icon="call_received"
-              />
-            }
           />
           <Route
             path="/operations/transfers"
