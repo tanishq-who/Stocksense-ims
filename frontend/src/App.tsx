@@ -6,6 +6,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { ProductsPage } from './pages/ProductsPage';
 import { ReceiptsPage } from './pages/ReceiptsPage';
 import { TransfersPage } from './pages/TransfersPage';
+import { AdjustmentsPage } from './pages/AdjustmentsPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 
 export const App: React.FC = () => {
@@ -24,20 +25,11 @@ export const App: React.FC = () => {
           <Route path="/receipts" element={<Navigate to="/operations/receipts" replace />} />
           <Route path="/operations/transfers" element={<TransfersPage />} />
           <Route path="/transfers" element={<Navigate to="/operations/transfers" replace />} />
+          <Route path="/operations/adjustments" element={<AdjustmentsPage />} />
+          <Route path="/adjustments" element={<Navigate to="/operations/adjustments" replace />} />
           <Route
             path="/operations"
             element={<Navigate to="/operations/deliveries" replace />}
-          />
-          <Route
-            path="/operations/adjustments"
-            element={
-              <PlaceholderPage
-                title="Inventory Adjustments"
-                section="Operations"
-                description="Perform cycle counts, damage reconciliations, lot audits, and variance logs."
-                icon="rule"
-              />
-            }
           />
           <Route path="/products" element={<ProductsPage />} />
           <Route
