@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -195,6 +196,245 @@ def patch_product(id: int, product_in: schemas.ProductUpdate, db: Session = Depe
             detail="Integrity violation while updating product.",
         )
     return product
+
+
+# Operations Endpoints (Receipts)
+@app.post(
+    "/operations/receipts",
+    response_model=schemas.OperationResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Operations"],
+    summary="Create a Draft incoming receipt operation",
+)
+def create_receipt(receipt_in: schemas.ReceiptCreate, db: Session = Depends(get_db)):
+    """
+    Create a Draft receipt with supplier, destination_location_id, and one or more lines
+    containing product_id and positive quantity.
+    """
+    # Verify destination location exists
+    dest_loc = db.query(models.Location).filter(models.Location.id == receipt_in.destination_location_id).first()
+    if not dest_loc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Destination location with ID {receipt_in.destination_location_id} not found.",
+        )
+
+    # Verify each product exists
+    for line in receipt_in.lines:
+        prod = db.query(models.Product).filter(models.Product.id == line.product_id).first()
+        if not prod:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Product with ID {line.product_id} not found.",
+            )
+
+    # Generate unique sequential operation reference (e.g. REC-00001)
+    total_ops = db.query(models.Operation).count()
+    ref_idx = total_ops + 1
+    reference = f"REC-{ref_idx:05d}"
+    while db.query(models.Operation).filter(models.Operation.reference == reference).first():
+        ref_idx += 1
+        reference = f"REC-{ref_idx:05d}"
+
+    operation = models.Operation(
+        reference=reference,
+        operation_type="receipt",
+        status="draft",
+        supplier=receipt_in.supplier,
+        destination_location_id=receipt_in.destination_location_id,
+    )
+    db.add(operation)
+    db.flush()
+
+    for line in receipt_in.lines:
+        op_line = models.OperationLine(
+            operation_id=operation.id,
+            product_id=line.product_id,
+            quantity=line.quantity,
+        )
+        db.add(op_line)
+
+    db.commit()
+    db.refresh(operation)
+    return operation
+
+
+@app.post(
+    "/operations/{id}/validate",
+    response_model=schemas.OperationResponse,
+    tags=["Operations"],
+    summary="Validate a Draft receipt operation",
+)
+def validate_operation(id: int, db: Session = Depends(get_db)):
+    """
+    Validate a Draft receipt operation using a database transaction:
+    1. Create or update StockLevel for every product at the destination location.
+    2. Increase quantity by the received amount.
+    3. Create an immutable StockLedgerEntry for every line with a positive delta,
+       timestamp, operation reference, location, and balance_after.
+    4. Change receipt status to Done.
+    5. Reject validation if it was already validated.
+    """
+    operation = db.query(models.Operation).filter(models.Operation.id == id).first()
+    if not operation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Operation with ID {id} not found.",
+        )
+
+    # Reject if already validated
+    if operation.status == "done":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Operation with ID {id} has already been validated and is marked as 'done'.",
+        )
+
+    if operation.status != "draft":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Only 'draft' operations can be validated. Current status is '{operation.status}'.",
+        )
+
+    if not operation.lines:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Operation has no lines to validate.",
+        )
+
+    if not operation.destination_location_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Receipt has no destination location specified.",
+        )
+
+    dest_location = db.query(models.Location).filter(models.Location.id == operation.destination_location_id).first()
+    if not dest_location:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Destination location with ID {operation.destination_location_id} does not exist.",
+        )
+
+    try:
+        now_ts = datetime.now(timezone.utc)
+        for line in operation.lines:
+            # 1 & 2: Create or update StockLevel and increase quantity
+            stock_level = (
+                db.query(models.StockLevel)
+                .filter(
+                    models.StockLevel.product_id == line.product_id,
+                    models.StockLevel.location_id == operation.destination_location_id,
+                )
+                .first()
+            )
+            if not stock_level:
+                product = db.query(models.Product).filter(models.Product.id == line.product_id).first()
+                reorder_threshold = product.reorder_level if product else 10.0
+                stock_level = models.StockLevel(
+                    product_id=line.product_id,
+                    location_id=operation.destination_location_id,
+                    quantity=line.quantity,
+                    reserved_quantity=0.0,
+                    reorder_threshold=reorder_threshold,
+                )
+                db.add(stock_level)
+                db.flush()
+                balance_after = stock_level.quantity
+            else:
+                stock_level.quantity += line.quantity
+                db.flush()
+                balance_after = stock_level.quantity
+
+            # 3: Create immutable StockLedgerEntry
+            ledger_entry = models.StockLedgerEntry(
+                product_id=line.product_id,
+                location_id=operation.destination_location_id,
+                operation_id=operation.id,
+                operation_reference=operation.reference,
+                delta=line.quantity,
+                balance_after=balance_after,
+                timestamp=now_ts,
+            )
+            db.add(ledger_entry)
+
+        # 4: Change receipt status to Done
+        operation.status = "done"
+        operation.updated_at = now_ts
+
+        db.commit()
+        db.refresh(operation)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Transaction failed during receipt validation: {str(e)}",
+        )
+
+    return operation
+
+
+@app.get(
+    "/operations",
+    response_model=List[schemas.OperationResponse],
+    tags=["Operations"],
+    summary="List all operations",
+)
+def list_operations(
+    status: Optional[str] = Query(None, description="Filter by status (e.g. draft, done)"),
+    operation_type: Optional[str] = Query(None, description="Filter by operation type (e.g. receipt)"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """List operations with optional filtering by status and operation type."""
+    query = db.query(models.Operation)
+    if status:
+        query = query.filter(models.Operation.status == status.strip().lower())
+    if operation_type:
+        query = query.filter(models.Operation.operation_type == operation_type.strip().lower())
+    return query.order_by(models.Operation.id.desc()).offset(skip).limit(limit).all()
+
+
+@app.get(
+    "/operations/{id}",
+    response_model=schemas.OperationResponse,
+    tags=["Operations"],
+    summary="Get operation by ID",
+)
+def get_operation(id: int, db: Session = Depends(get_db)):
+    """Retrieve details for a single operation by ID."""
+    operation = db.query(models.Operation).filter(models.Operation.id == id).first()
+    if not operation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Operation with ID {id} not found.",
+        )
+    return operation
+
+
+# Ledger Endpoints
+@app.get(
+    "/ledger",
+    response_model=List[schemas.StockLedgerEntryResponse],
+    tags=["Stock Ledger"],
+    summary="List stock ledger entries",
+)
+def list_stock_ledger(
+    product_id: Optional[int] = Query(None, description="Filter by product ID"),
+    location_id: Optional[int] = Query(None, description="Filter by location ID"),
+    operation_reference: Optional[str] = Query(None, description="Filter by operation reference"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """List immutable stock ledger audit trail entries."""
+    query = db.query(models.StockLedgerEntry)
+    if product_id is not None:
+        query = query.filter(models.StockLedgerEntry.product_id == product_id)
+    if location_id is not None:
+        query = query.filter(models.StockLedgerEntry.location_id == location_id)
+    if operation_reference is not None:
+        query = query.filter(models.StockLedgerEntry.operation_reference == operation_reference.strip())
+    return query.order_by(models.StockLedgerEntry.id.desc()).offset(skip).limit(limit).all()
 
 
 # Warehouse Endpoints

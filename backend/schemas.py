@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -12,8 +12,8 @@ class HealthResponse(BaseModel):
 class ProductBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Product name (required)")
     sku: str = Field(..., min_length=1, max_length=100, description="Stock Keeping Unit (required, unique)")
-    description: Optional[str] = Field(None, description="Product description")
-    category: Optional[str] = Field(None, max_length=100, description="Product category")
+    description: Optional[str] = None
+    category: Optional[str] = None
     price: float = Field(default=0.0, ge=0.0, description="Unit price, must be >= 0")
     unit_of_measure: str = Field(..., min_length=1, max_length=50, description="Unit of measurement (required)")
     reorder_level: float = Field(default=0.0, ge=0.0, description="Reorder level threshold, must be >= 0")
@@ -136,5 +136,61 @@ class StockLevelResponse(StockLevelBase):
     id: int
     created_at: datetime
     updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# Operation & Receipt Schemas
+class OperationLineCreate(BaseModel):
+    product_id: int = Field(..., gt=0, description="Product ID (must be > 0)")
+    quantity: float = Field(..., gt=0.0, description="Received quantity (must be greater than 0)")
+
+
+class OperationLineResponse(BaseModel):
+    id: int
+    operation_id: int
+    product_id: int
+    quantity: float
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReceiptCreate(BaseModel):
+    supplier: str = Field(..., min_length=1, max_length=255, description="Supplier name (required)")
+    destination_location_id: int = Field(..., gt=0, description="Destination location ID (required)")
+    lines: List[OperationLineCreate] = Field(..., min_length=1, description="One or more lines containing product_id and positive quantity")
+
+    @field_validator("supplier")
+    @classmethod
+    def validate_supplier(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Supplier is required and cannot be empty or whitespace.")
+        return value.strip()
+
+
+class OperationResponse(BaseModel):
+    id: int
+    reference: str
+    operation_type: str
+    status: str
+    supplier: Optional[str] = None
+    destination_location_id: Optional[int] = None
+    lines: List[OperationLineResponse] = []
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# Stock Ledger Schemas
+class StockLedgerEntryResponse(BaseModel):
+    id: int
+    product_id: int
+    location_id: int
+    operation_id: Optional[int] = None
+    operation_reference: str
+    delta: float
+    balance_after: float
+    timestamp: datetime
 
     model_config = ConfigDict(from_attributes=True)
