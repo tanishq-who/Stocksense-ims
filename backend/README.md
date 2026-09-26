@@ -8,7 +8,7 @@ StockSense Inventory Management System (IMS) backend service built with **FastAP
 - **ORM / Database**: [SQLAlchemy](https://www.sqlalchemy.org/) with persistent local [SQLite](https://www.sqlite.org/).
 - **Validation & Serialization**: [Pydantic v2](https://docs.pydantic.dev/) schemas with clear, descriptive validation errors.
 - **CORS enabled**: Pre-configured to allow frontend integration.
-- **Transactional Stock Operations**: Atomic updates across stock balances and an immutable audit ledger for Receipts, Deliveries, and Internal Transfers.
+- **Transactional Stock Operations**: Atomic updates across stock balances and an immutable audit ledger for Receipts, Deliveries, Internal Transfers, and Stock Adjustments.
 - **Automatic Schema Migration / Initialization**: SQLite tables and columns are automatically initialized and migrated upon startup.
 
 ## Data Models
@@ -39,7 +39,7 @@ The SQLite database (`stocksense.db`) defines relational models for real-time in
    - `warehouse_id`: Foreign key to `warehouses.id`
    - `name`: Location identifier (e.g. `Aisle 1 - Shelf B`)
    - `code`: Location code (e.g. `WH1-A1-S1`)
-   - `location_type`: Zone type (`internal`, `receiving`, `dispatch`)
+   - `location_type`: Zone type (`internal`, `receiving`, `dispatch`, `storage`)
    - `created_at` / `updated_at`: Timestamps
 
 4. **`StockLevel`**:
@@ -54,30 +54,34 @@ The SQLite database (`stocksense.db`) defines relational models for real-time in
 
 5. **`Operation`**:
    - `id`: Primary key
-   - `reference`: Unique sequential code (e.g. `REC-00001`, `DEL-00001`, `TRF-00001`)
-   - `operation_type`: Operation type (`receipt`, `delivery`, `transfer`)
+   - `reference`: Unique sequential code (e.g. `REC-00001`, `DEL-00001`, `TRF-00001`, `ADJ-00001`)
+   - `operation_type`: Operation type (`receipt`, `delivery`, `transfer`, `adjustment`)
    - `status`: Lifecycle state (`draft`, `done`, `cancelled`)
    - `supplier`: Supplier name (for receipts)
    - `customer`: Customer / contact name (for deliveries)
+   - `location_id`: Location foreign key (for adjustments)
    - `source_location_id`: Foreign key to `locations.id` (source for deliveries and transfers)
    - `destination_location_id`: Foreign key to `locations.id` (destination for receipts and transfers)
    - `scheduled_date`: Delivery or transfer scheduled date
+   - `reason`: Optional reason or audit rationale (e.g. damaged goods, annual stocktake)
    - `created_at` / `updated_at`: Timestamps
 
 6. **`OperationLine`**:
    - `id`: Primary key
    - `operation_id`: Foreign key to `operations.id`
    - `product_id`: Foreign key to `products.id`
-   - `quantity`: Moved quantity (> 0)
+   - `quantity`: Moved quantity (> 0 for movements, or physical count)
+   - `physical_count`: Counted physical quantity on-hand for adjustments (>= 0)
 
 7. **`StockLedgerEntry`**:
    - `id`: Primary key
    - `product_id`: Foreign key to `products.id`
    - `location_id`: Foreign key to `locations.id`
    - `operation_id`: Foreign key to `operations.id`
-   - `operation_reference`: Operation reference string (e.g. `REC-00001`, `DEL-00001`, `TRF-00001`)
-   - `delta`: Stock change delta (positive for receipts, negative for deliveries, dual positive/negative for transfers)
+   - `operation_reference`: Operation reference string (e.g. `REC-00001`, `DEL-00001`, `TRF-00001`, `ADJ-00001`)
+   - `delta`: Stock change delta (positive for receipts, negative for deliveries, dual positive/negative for transfers, calculated `physical_count - current_quantity` for adjustments)
    - `balance_after`: Resulting stock level at location
+   - `reason`: Audit reason string copied from the validated operation
    - `timestamp`: UTC timestamp of the transaction
 
 ---
@@ -140,7 +144,7 @@ The server starts at `http://127.0.0.1:8000`.
 - **Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **ReDoc**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
 
-### Inventory Operations (Receipts, Deliveries, and Transfers)
+### Inventory Operations (Receipts, Deliveries, Transfers, and Adjustments)
 
 #### Incoming Receipts
 - **`POST /operations/receipts`**: Create a `draft` incoming receipt operation.
@@ -167,6 +171,25 @@ The server starts at `http://127.0.0.1:8000`.
     ```
   - Validates that source and destination locations are different, both exist, and line quantities are positive.
 
+#### Stock Adjustments
+- **`POST /operations/adjustments`**
+  - Creates a `draft` stock adjustment for cycle counts, audits, or inventory corrections.
+  - Body:
+    ```json
+    {
+      "location_id": 1,
+      "lines": [
+        {
+          "product_id": 1,
+          "physical_count": 35.0
+        }
+      ],
+      "reason": "Damaged inventory discovered during aisle 3 audit"
+    }
+    ```
+  - Validates `location_id` and all `product_id`s exist, and requires `physical_count >= 0.0`.
+  - Automatically generates unique reference `ADJ-00001`.
+
 #### Operation Validation
 - **`POST /operations/{id}/validate`**
   - Validates a `draft` operation in a single atomic database transaction:
@@ -179,12 +202,20 @@ The server starts at `http://127.0.0.1:8000`.
       4. Decreases source `StockLevel` and increases destination `StockLevel`.
       5. Creates **two** `StockLedgerEntry` records per line: negative source entry and positive destination entry, both with `balance_after`.
       6. Marks operation `done`.
+    - **For Stock Adjustments**:
+      1. Validates `physical_count >= 0.0`.
+      2. Reads current `StockLevel` for each product at the target location.
+      3. Computes `delta = physical_count - current_quantity`.
+      4. Updates `StockLevel.quantity = physical_count` (or creates `StockLevel` if none existed).
+      5. Records immutable `StockLedgerEntry` with `delta`, `physical_count` as `balance_after`, `location_id`, timestamp, operation reference, and audit `reason`.
+      6. Supports both negative deltas (shrinkage/damaged goods) and positive deltas (found inventory).
+      7. Marks operation `done`.
     - Repeated validation is rejected with HTTP 400.
 
 #### Operations Querying & Ledger
-- **`GET /operations`**: List operations. Supports filtering by `status` (e.g. `draft`, `done`) and `operation_type` (e.g. `receipt`, `delivery`, `transfer`).
+- **`GET /operations`**: List operations. Supports filtering by `status` (e.g. `draft`, `done`) and `operation_type` (e.g. `receipt`, `delivery`, `transfer`, `adjustment`).
 - **`GET /operations/{id}`**: Retrieve single operation by ID.
-- **`GET /ledger`**: List immutable audit trail entries. Supports filtering by `product_id`, `location_id`, and `operation_reference`.
+- **`GET /ledger`**: List immutable audit trail entries with balance after and reason. Supports filtering by `product_id`, `location_id`, and `operation_reference`.
 
 ### Product Management APIs
 - **`GET /products`**: List all products (supports `search`, `category`, pagination).

@@ -46,5 +46,21 @@ def init_db():
                 conn.execute(text("ALTER TABLE operations ADD COLUMN source_location_id INTEGER"))
             if "scheduled_date" not in op_columns:
                 conn.execute(text("ALTER TABLE operations ADD COLUMN scheduled_date DATETIME"))
+            if "location_id" not in op_columns:
+                conn.execute(text("ALTER TABLE operations ADD COLUMN location_id INTEGER"))
+            if "reason" not in op_columns:
+                conn.execute(text("ALTER TABLE operations ADD COLUMN reason VARCHAR"))
+
+        # Migrate operation_lines columns if needed
+        result = conn.execute(text("PRAGMA table_info(operation_lines)"))
+        line_columns = [row[1] for row in result.fetchall()]
+        if line_columns and "physical_count" not in line_columns:
+            conn.execute(text("ALTER TABLE operation_lines ADD COLUMN physical_count FLOAT"))
+
+        # Migrate stock_ledger_entries columns if needed
+        result = conn.execute(text("PRAGMA table_info(stock_ledger_entries)"))
+        ledger_columns = [row[1] for row in result.fetchall()]
+        if ledger_columns and "reason" not in ledger_columns:
+            conn.execute(text("ALTER TABLE stock_ledger_entries ADD COLUMN reason VARCHAR"))
 
         conn.commit()

@@ -390,10 +390,69 @@ def create_transfer(transfer_in: schemas.TransferCreate, db: Session = Depends(g
 
 
 @app.post(
+    "/operations/adjustments",
+    response_model=schemas.OperationResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Operations"],
+    summary="Create a Draft stock adjustment operation",
+)
+def create_adjustment(adjustment_in: schemas.AdjustmentCreate, db: Session = Depends(get_db)):
+    """
+    Create a Draft stock adjustment with location_id, one or more lines
+    containing product_id and physical_count, and an optional reason.
+    """
+    loc = db.query(models.Location).filter(models.Location.id == adjustment_in.location_id).first()
+    if not loc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Location with ID {adjustment_in.location_id} not found.",
+        )
+
+    for line in adjustment_in.lines:
+        prod = db.query(models.Product).filter(models.Product.id == line.product_id).first()
+        if not prod:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Product with ID {line.product_id} not found.",
+            )
+
+    # Generate unique sequential operation reference for adjustments
+    total_adjustments = db.query(models.Operation).filter(models.Operation.operation_type == "adjustment").count()
+    ref_idx = total_adjustments + 1
+    reference = f"ADJ-{ref_idx:05d}"
+    while db.query(models.Operation).filter(models.Operation.reference == reference).first():
+        ref_idx += 1
+        reference = f"ADJ-{ref_idx:05d}"
+
+    operation = models.Operation(
+        reference=reference,
+        operation_type="adjustment",
+        status="draft",
+        location_id=adjustment_in.location_id,
+        reason=adjustment_in.reason,
+    )
+    db.add(operation)
+    db.flush()
+
+    for line in adjustment_in.lines:
+        op_line = models.OperationLine(
+            operation_id=operation.id,
+            product_id=line.product_id,
+            quantity=line.physical_count,
+            physical_count=line.physical_count,
+        )
+        db.add(op_line)
+
+    db.commit()
+    db.refresh(operation)
+    return operation
+
+
+@app.post(
     "/operations/{id}/validate",
     response_model=schemas.OperationResponse,
     tags=["Operations"],
-    summary="Validate a Draft operation (Receipt, Delivery, or Transfer)",
+    summary="Validate a Draft operation (Receipt, Delivery, Transfer, or Adjustment)",
 )
 def validate_operation(id: int, db: Session = Depends(get_db)):
     """
@@ -421,6 +480,16 @@ def validate_operation(id: int, db: Session = Depends(get_db)):
     5. Create two StockLedgerEntry records per line: a negative source entry and a positive destination entry,
        both with balance_after.
     6. Mark the operation Done and reject repeated validation.
+
+    For Stock Adjustments:
+    1. physical_count must be zero or greater.
+    2. Read current StockLevel for each product/location.
+    3. Calculate delta = physical_count - current_quantity.
+    4. Set the StockLevel quantity to physical_count.
+    5. Create immutable StockLedgerEntry with that delta, physical_count as balance_after,
+       location, timestamp, operation reference, and reason.
+    6. Mark the adjustment Done and reject repeated validation.
+    7. Support both positive and negative adjustment deltas.
     """
     operation = db.query(models.Operation).filter(models.Operation.id == id).first()
     if not operation:
@@ -770,6 +839,94 @@ def validate_operation(id: int, db: Session = Depends(get_db)):
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Transaction failed during transfer validation: {str(e)}",
+            )
+        return operation
+
+    # Case D: Stock Adjustment Validation
+    elif operation.operation_type == "adjustment":
+        if not operation.location_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Stock adjustment has no location specified.",
+            )
+
+        loc = db.query(models.Location).filter(models.Location.id == operation.location_id).first()
+        if not loc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Location with ID {operation.location_id} does not exist.",
+            )
+
+        # Rule 1: physical_count must be zero or greater
+        for line in operation.lines:
+            target_count = line.physical_count if line.physical_count is not None else line.quantity
+            if target_count < 0.0:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Physical count for product ID {line.product_id} must be zero or greater.",
+                )
+
+        try:
+            for line in operation.lines:
+                target_count = line.physical_count if line.physical_count is not None else line.quantity
+
+                # Rule 2: Read current StockLevel for each product/location
+                stock_level = (
+                    db.query(models.StockLevel)
+                    .filter(
+                        models.StockLevel.product_id == line.product_id,
+                        models.StockLevel.location_id == operation.location_id,
+                    )
+                    .first()
+                )
+                current_qty = stock_level.quantity if stock_level else 0.0
+
+                # Rule 3: Calculate delta = physical_count - current_quantity
+                delta = target_count - current_qty
+
+                # Rule 4: Set the StockLevel quantity to physical_count
+                if not stock_level:
+                    product = db.query(models.Product).filter(models.Product.id == line.product_id).first()
+                    reorder_threshold = product.reorder_level if product else 10.0
+                    stock_level = models.StockLevel(
+                        product_id=line.product_id,
+                        location_id=operation.location_id,
+                        quantity=target_count,
+                        reserved_quantity=0.0,
+                        reorder_threshold=reorder_threshold,
+                    )
+                    db.add(stock_level)
+                else:
+                    stock_level.quantity = target_count
+                db.flush()
+
+                # Rule 5: Create immutable StockLedgerEntry with delta, physical_count as balance_after,
+                # location, timestamp, operation reference, and reason
+                ledger_entry = models.StockLedgerEntry(
+                    product_id=line.product_id,
+                    location_id=operation.location_id,
+                    operation_id=operation.id,
+                    operation_reference=operation.reference,
+                    delta=delta,
+                    balance_after=target_count,
+                    reason=operation.reason,
+                    timestamp=now_ts,
+                )
+                db.add(ledger_entry)
+
+            # Rule 6: Mark Done
+            operation.status = "done"
+            operation.updated_at = now_ts
+            db.commit()
+            db.refresh(operation)
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Transaction failed during adjustment validation: {str(e)}",
             )
         return operation
 

@@ -151,6 +151,7 @@ class OperationLineResponse(BaseModel):
     operation_id: int
     product_id: int
     quantity: float
+    physical_count: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -198,6 +199,26 @@ class TransferCreate(BaseModel):
         return self
 
 
+# Stock Adjustment Creation Schema
+class AdjustmentLineCreate(BaseModel):
+    product_id: int = Field(..., gt=0, description="Product ID (must be > 0)")
+    physical_count: float = Field(..., ge=0.0, description="Physical count quantity (must be zero or greater)")
+
+
+class AdjustmentCreate(BaseModel):
+    location_id: int = Field(..., gt=0, description="Location ID where inventory adjustment is performed (required)")
+    lines: List[AdjustmentLineCreate] = Field(..., min_length=1, description="One or more lines containing product_id and physical_count (>= 0)")
+    reason: Optional[str] = Field(None, max_length=500, description="Optional reason for the adjustment (e.g. damaged inventory, count discrepancy)")
+
+    @field_validator("reason")
+    @classmethod
+    def clean_reason(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            val = value.strip()
+            return val if val else None
+        return None
+
+
 class OperationResponse(BaseModel):
     id: int
     reference: str
@@ -205,9 +226,11 @@ class OperationResponse(BaseModel):
     status: str
     supplier: Optional[str] = None
     customer: Optional[str] = None
+    location_id: Optional[int] = None
     source_location_id: Optional[int] = None
     destination_location_id: Optional[int] = None
     scheduled_date: Optional[datetime] = None
+    reason: Optional[str] = None
     lines: List[OperationLineResponse] = []
     created_at: datetime
     updated_at: datetime
@@ -224,6 +247,7 @@ class StockLedgerEntryResponse(BaseModel):
     operation_reference: str
     delta: float
     balance_after: float
+    reason: Optional[str] = None
     timestamp: datetime
 
     model_config = ConfigDict(from_attributes=True)

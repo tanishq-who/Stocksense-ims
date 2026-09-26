@@ -110,9 +110,11 @@ class Operation(Base):
     status = Column(String, nullable=False, default="draft", index=True)
     supplier = Column(String, nullable=True)
     customer = Column(String, nullable=True)
+    location_id = Column(Integer, ForeignKey("locations.id", ondelete="RESTRICT"), nullable=True, index=True)
     source_location_id = Column(Integer, ForeignKey("locations.id", ondelete="RESTRICT"), nullable=True, index=True)
     destination_location_id = Column(Integer, ForeignKey("locations.id", ondelete="RESTRICT"), nullable=True, index=True)
     scheduled_date = Column(DateTime, nullable=True)
+    reason = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     updated_at = Column(
         DateTime,
@@ -121,6 +123,7 @@ class Operation(Base):
         server_default=func.now(),
     )
 
+    location = relationship("Location", foreign_keys=[location_id])
     source_location = relationship("Location", foreign_keys=[source_location_id])
     destination_location = relationship("Location", foreign_keys=[destination_location_id])
     lines = relationship("OperationLine", back_populates="operation", cascade="all, delete-orphan")
@@ -132,7 +135,8 @@ class OperationLine(Base):
     id = Column(Integer, primary_key=True, index=True)
     operation_id = Column(Integer, ForeignKey("operations.id", ondelete="CASCADE"), nullable=False, index=True)
     product_id = Column(Integer, ForeignKey("products.id", ondelete="RESTRICT"), nullable=False, index=True)
-    quantity = Column(Float, nullable=False)
+    quantity = Column(Float, nullable=False, default=0.0)
+    physical_count = Column(Float, nullable=True)
 
     operation = relationship("Operation", back_populates="lines")
     product = relationship("Product")
@@ -148,6 +152,7 @@ class StockLedgerEntry(Base):
     operation_reference = Column(String, nullable=False, index=True)
     delta = Column(Float, nullable=False)
     balance_after = Column(Float, nullable=False)
+    reason = Column(String, nullable=True)
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now(), nullable=False)
 
     product = relationship("Product")
