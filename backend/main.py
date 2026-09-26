@@ -198,7 +198,7 @@ def patch_product(id: int, product_in: schemas.ProductUpdate, db: Session = Depe
     return product
 
 
-# Operations Endpoints (Receipts & Deliveries)
+# Operations Endpoints (Receipts, Deliveries, and Internal Transfers)
 @app.post(
     "/operations/receipts",
     response_model=schemas.OperationResponse,
@@ -317,10 +317,83 @@ def create_delivery(delivery_in: schemas.DeliveryCreate, db: Session = Depends(g
 
 
 @app.post(
+    "/operations/transfers",
+    response_model=schemas.OperationResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Operations"],
+    summary="Create a Draft internal transfer operation",
+)
+def create_transfer(transfer_in: schemas.TransferCreate, db: Session = Depends(get_db)):
+    """
+    Create a Draft internal transfer with source_location_id, destination_location_id,
+    scheduled_date, and one or more lines with product_id and positive quantity.
+    """
+    # Rule 1: Source and destination locations must be different
+    if transfer_in.source_location_id == transfer_in.destination_location_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Source location and destination location must be different.",
+        )
+
+    source_loc = db.query(models.Location).filter(models.Location.id == transfer_in.source_location_id).first()
+    if not source_loc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Source location with ID {transfer_in.source_location_id} not found.",
+        )
+
+    dest_loc = db.query(models.Location).filter(models.Location.id == transfer_in.destination_location_id).first()
+    if not dest_loc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Destination location with ID {transfer_in.destination_location_id} not found.",
+        )
+
+    for line in transfer_in.lines:
+        prod = db.query(models.Product).filter(models.Product.id == line.product_id).first()
+        if not prod:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Product with ID {line.product_id} not found.",
+            )
+
+    # Generate unique sequential operation reference for internal transfers
+    total_transfers = db.query(models.Operation).filter(models.Operation.operation_type == "transfer").count()
+    ref_idx = total_transfers + 1
+    reference = f"TRF-{ref_idx:05d}"
+    while db.query(models.Operation).filter(models.Operation.reference == reference).first():
+        ref_idx += 1
+        reference = f"TRF-{ref_idx:05d}"
+
+    operation = models.Operation(
+        reference=reference,
+        operation_type="transfer",
+        status="draft",
+        source_location_id=transfer_in.source_location_id,
+        destination_location_id=transfer_in.destination_location_id,
+        scheduled_date=transfer_in.scheduled_date or datetime.now(timezone.utc),
+    )
+    db.add(operation)
+    db.flush()
+
+    for line in transfer_in.lines:
+        op_line = models.OperationLine(
+            operation_id=operation.id,
+            product_id=line.product_id,
+            quantity=line.quantity,
+        )
+        db.add(op_line)
+
+    db.commit()
+    db.refresh(operation)
+    return operation
+
+
+@app.post(
     "/operations/{id}/validate",
     response_model=schemas.OperationResponse,
     tags=["Operations"],
-    summary="Validate a Draft operation (Receipt or Delivery)",
+    summary="Validate a Draft operation (Receipt, Delivery, or Transfer)",
 )
 def validate_operation(id: int, db: Session = Depends(get_db)):
     """
@@ -340,7 +413,14 @@ def validate_operation(id: int, db: Session = Depends(get_db)):
     4. Create immutable StockLedgerEntry records with negative deltas and balance_after.
     5. Mark the delivery Done.
 
-    Both reject validating an already Done or non-draft operation.
+    For Internal Transfers:
+    1. Source and destination locations must be different.
+    2. Check that all products have sufficient stock at the source before changing data.
+    3. If insufficient, return a clear 422 error and change nothing.
+    4. On success, decrease source StockLevel and increase destination StockLevel within one database transaction.
+    5. Create two StockLedgerEntry records per line: a negative source entry and a positive destination entry,
+       both with balance_after.
+    6. Mark the operation Done and reject repeated validation.
     """
     operation = db.query(models.Operation).filter(models.Operation.id == id).first()
     if not operation:
@@ -535,6 +615,164 @@ def validate_operation(id: int, db: Session = Depends(get_db)):
             )
         return operation
 
+    # Case C: Internal Transfer Validation
+    elif operation.operation_type == "transfer":
+        if not operation.source_location_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Transfer operation has no source location specified.",
+            )
+        if not operation.destination_location_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Transfer operation has no destination location specified.",
+            )
+
+        # Rule 1: Source and destination locations must be different
+        if operation.source_location_id == operation.destination_location_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Source location and destination location must be different.",
+            )
+
+        source_location = db.query(models.Location).filter(models.Location.id == operation.source_location_id).first()
+        if not source_location:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Source location with ID {operation.source_location_id} does not exist.",
+            )
+
+        dest_location = db.query(models.Location).filter(models.Location.id == operation.destination_location_id).first()
+        if not dest_location:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Destination location with ID {operation.destination_location_id} does not exist.",
+            )
+
+        # Rule 2: Check that all products have sufficient stock at the source before changing data
+        requested_totals = {}
+        for line in operation.lines:
+            requested_totals[line.product_id] = requested_totals.get(line.product_id, 0.0) + line.quantity
+
+        insufficient_items = []
+        for prod_id, req_qty in requested_totals.items():
+            stock_level = (
+                db.query(models.StockLevel)
+                .filter(
+                    models.StockLevel.product_id == prod_id,
+                    models.StockLevel.location_id == operation.source_location_id,
+                )
+                .first()
+            )
+            available_qty = stock_level.quantity if stock_level else 0.0
+            if available_qty < req_qty:
+                product = db.query(models.Product).filter(models.Product.id == prod_id).first()
+                prod_name = product.name if product else f"Product #{prod_id}"
+                prod_sku = product.sku if product else ""
+                insufficient_items.append({
+                    "product_id": prod_id,
+                    "product_name": prod_name,
+                    "sku": prod_sku,
+                    "requested_quantity": req_qty,
+                    "available_quantity": available_qty,
+                    "shortage": req_qty - available_qty,
+                })
+
+        # Rule 3: If insufficient, return clear 422 error and change nothing
+        if insufficient_items:
+            error_details = [
+                f"'{item['product_name']}' (SKU: {item['sku']}): requested {item['requested_quantity']}, available {item['available_quantity']} (shortage: {item['shortage']})"
+                for item in insufficient_items
+            ]
+            detail_msg = f"Insufficient stock at source location: {'; '.join(error_details)}."
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "message": detail_msg,
+                    "insufficient_items": insufficient_items,
+                },
+            )
+
+        # Rule 4 & 5: Decrease source, increase destination, and create two ledger entries per line
+        try:
+            for line in operation.lines:
+                # 1. Decrease source StockLevel
+                src_stock = (
+                    db.query(models.StockLevel)
+                    .filter(
+                        models.StockLevel.product_id == line.product_id,
+                        models.StockLevel.location_id == operation.source_location_id,
+                    )
+                    .first()
+                )
+                src_stock.quantity -= line.quantity
+                db.flush()
+                src_balance_after = src_stock.quantity
+
+                # 2. Increase destination StockLevel
+                dst_stock = (
+                    db.query(models.StockLevel)
+                    .filter(
+                        models.StockLevel.product_id == line.product_id,
+                        models.StockLevel.location_id == operation.destination_location_id,
+                    )
+                    .first()
+                )
+                if not dst_stock:
+                    product = db.query(models.Product).filter(models.Product.id == line.product_id).first()
+                    reorder_threshold = product.reorder_level if product else 10.0
+                    dst_stock = models.StockLevel(
+                        product_id=line.product_id,
+                        location_id=operation.destination_location_id,
+                        quantity=line.quantity,
+                        reserved_quantity=0.0,
+                        reorder_threshold=reorder_threshold,
+                    )
+                    db.add(dst_stock)
+                    db.flush()
+                    dst_balance_after = dst_stock.quantity
+                else:
+                    dst_stock.quantity += line.quantity
+                    db.flush()
+                    dst_balance_after = dst_stock.quantity
+
+                # 3. Create negative source StockLedgerEntry
+                src_ledger = models.StockLedgerEntry(
+                    product_id=line.product_id,
+                    location_id=operation.source_location_id,
+                    operation_id=operation.id,
+                    operation_reference=operation.reference,
+                    delta=-line.quantity,
+                    balance_after=src_balance_after,
+                    timestamp=now_ts,
+                )
+                db.add(src_ledger)
+
+                # 4. Create positive destination StockLedgerEntry
+                dst_ledger = models.StockLedgerEntry(
+                    product_id=line.product_id,
+                    location_id=operation.destination_location_id,
+                    operation_id=operation.id,
+                    operation_reference=operation.reference,
+                    delta=line.quantity,
+                    balance_after=dst_balance_after,
+                    timestamp=now_ts,
+                )
+                db.add(dst_ledger)
+
+            # Rule 6: Mark Done
+            operation.status = "done"
+            operation.updated_at = now_ts
+            db.commit()
+            db.refresh(operation)
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Transaction failed during transfer validation: {str(e)}",
+            )
+        return operation
+
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -550,7 +788,7 @@ def validate_operation(id: int, db: Session = Depends(get_db)):
 )
 def list_operations(
     status: Optional[str] = Query(None, description="Filter by status (e.g. draft, done)"),
-    operation_type: Optional[str] = Query(None, description="Filter by operation type (e.g. receipt, delivery)"),
+    operation_type: Optional[str] = Query(None, description="Filter by operation type (e.g. receipt, delivery, transfer)"),
     type: Optional[str] = Query(None, description="Alias for operation_type"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),

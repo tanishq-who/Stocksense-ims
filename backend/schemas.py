@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import List, Optional
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # Health Check Schema
@@ -182,6 +182,20 @@ class DeliveryCreate(BaseModel):
         if not value or not value.strip():
             raise ValueError("Customer/contact is required and cannot be empty or whitespace.")
         return value.strip()
+
+
+# Internal Transfer Creation Schema
+class TransferCreate(BaseModel):
+    source_location_id: int = Field(..., gt=0, description="Source location ID (required)")
+    destination_location_id: int = Field(..., gt=0, description="Destination location ID (required)")
+    scheduled_date: Optional[datetime] = Field(None, description="Scheduled date for transfer")
+    lines: List[OperationLineCreate] = Field(..., min_length=1, description="One or more lines containing product_id and positive quantity")
+
+    @model_validator(mode="after")
+    def validate_different_locations(self):
+        if self.source_location_id == self.destination_location_id:
+            raise ValueError("Source location and destination location must be different.")
+        return self
 
 
 class OperationResponse(BaseModel):
