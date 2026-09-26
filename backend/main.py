@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -1002,6 +1003,380 @@ def list_stock_ledger(
     if operation_reference is not None:
         query = query.filter(models.StockLedgerEntry.operation_reference == operation_reference.strip())
     return query.order_by(models.StockLedgerEntry.id.desc()).offset(skip).limit(limit).all()
+
+
+# Dashboard and Alert Endpoints
+@app.get(
+    "/dashboard",
+    response_model=schemas.DashboardResponse,
+    tags=["Dashboard & Alerts"],
+    summary="Get aggregated dashboard metrics and low-stock overview",
+)
+@app.get(
+    "/api/dashboard",
+    response_model=schemas.DashboardResponse,
+    include_in_schema=False,
+)
+def get_dashboard(
+    operation_type: Optional[str] = Query(None, description="Filter operations by type (receipt, delivery, transfer, adjustment)"),
+    status: Optional[str] = Query(None, description="Filter operations by status (draft, done, cancelled)"),
+    warehouse_id: Optional[int] = Query(None, description="Filter metrics by warehouse ID"),
+    location_id: Optional[int] = Query(None, description="Filter metrics by location ID"),
+    category: Optional[str] = Query(None, description="Filter metrics by product category"),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieve real-time SQLite-backed dashboard metrics:
+    - total_products_in_stock
+    - low_stock_count
+    - out_of_stock_count
+    - pending_receipts_count
+    - pending_deliveries_count
+    - scheduled_transfers_count
+    - low_stock_products list with product name, SKU, available quantity, reorder_level, and location
+    - recent_operations list
+    Supports query filters: operation_type, status, warehouse_id, location_id, category.
+    """
+    # 1. Determine target location IDs based on location_id and/or warehouse_id
+    target_location_ids = None
+    if location_id is not None and warehouse_id is not None:
+        loc = db.query(models.Location).filter(
+            models.Location.id == location_id,
+            models.Location.warehouse_id == warehouse_id,
+        ).first()
+        target_location_ids = [location_id] if loc else []
+    elif location_id is not None:
+        loc = db.query(models.Location).filter(models.Location.id == location_id).first()
+        target_location_ids = [location_id] if loc else []
+    elif warehouse_id is not None:
+        locs = db.query(models.Location.id).filter(models.Location.warehouse_id == warehouse_id).all()
+        target_location_ids = [loc[0] for loc in locs]
+
+    # 2. Query products matching category if provided
+    prod_query = db.query(models.Product)
+    if category and category.strip():
+        prod_query = prod_query.filter(func.lower(models.Product.category) == category.strip().lower())
+    products = prod_query.all()
+    matching_product_ids = {p.id for p in products}
+
+    # 3. Query stock levels in scope
+    if target_location_ids is not None and not target_location_ids:
+        stock_levels = []
+    else:
+        stock_query = db.query(models.StockLevel)
+        if target_location_ids is not None:
+            stock_query = stock_query.filter(models.StockLevel.location_id.in_(target_location_ids))
+        if matching_product_ids:
+            stock_query = stock_query.filter(models.StockLevel.product_id.in_(matching_product_ids))
+            stock_levels = stock_query.all()
+        else:
+            stock_levels = []
+
+    prod_stock_map = {}
+    for sl in stock_levels:
+        prod_stock_map.setdefault(sl.product_id, []).append(sl)
+
+    total_products_in_stock = 0
+    out_of_stock_count = 0
+    low_stock_products = []
+    total_inventory_quantity = 0.0
+
+    if target_location_ids is not None:
+        relevant_products = [p for p in products if p.id in prod_stock_map]
+    else:
+        relevant_products = products
+
+    for prod in relevant_products:
+        p_levels = prod_stock_map.get(prod.id, [])
+        total_avail_for_prod = 0.0
+
+        for sl in p_levels:
+            avail = max(0.0, sl.quantity - (sl.reserved_quantity or 0.0))
+            total_avail_for_prod += avail
+            total_inventory_quantity += sl.quantity
+
+            # Low stock rule: available quantity > 0 and <= reorder_level
+            reorder_lvl = prod.reorder_level if prod.reorder_level > 0.0 else (
+                sl.reorder_threshold if sl.reorder_threshold > 0.0 else 0.0
+            )
+            if reorder_lvl > 0.0 and 0.0 < avail <= reorder_lvl:
+                loc_name = sl.location.name if sl.location else f"Location #{sl.location_id}"
+                wh_id = sl.location.warehouse_id if sl.location else None
+                wh_name = sl.location.warehouse.name if (sl.location and sl.location.warehouse) else None
+                low_stock_products.append(
+                    schemas.LowStockProductItem(
+                        product_id=prod.id,
+                        product_name=prod.name,
+                        name=prod.name,
+                        sku=prod.sku,
+                        category=prod.category,
+                        available_quantity=avail,
+                        quantity=avail,
+                        reorder_level=reorder_lvl,
+                        location_id=sl.location_id,
+                        location=loc_name,
+                        warehouse_id=wh_id,
+                        warehouse_name=wh_name,
+                        unit_of_measure=prod.unit_of_measure,
+                        status="low_stock",
+                    )
+                )
+
+        if total_avail_for_prod > 0.0:
+            total_products_in_stock += 1
+        else:
+            out_of_stock_count += 1
+
+    low_stock_count = len(low_stock_products)
+
+    # 4. Pending and scheduled operations counts
+    def apply_op_category(q):
+        if category and category.strip():
+            return q.filter(
+                models.Operation.lines.any(
+                    models.OperationLine.product.has(
+                        func.lower(models.Product.category) == category.strip().lower()
+                    )
+                )
+            )
+        return q
+
+    # Pending Receipts (draft receipts)
+    pending_receipts_count = 0
+    if (operation_type is None or operation_type.strip().lower() == "receipt") and (
+        status is None or status.strip().lower() == "draft"
+    ):
+        if target_location_ids is not None and not target_location_ids:
+            pending_receipts_count = 0
+        else:
+            q_rec = db.query(models.Operation).filter(
+                models.Operation.operation_type == "receipt",
+                models.Operation.status == "draft",
+            )
+            if target_location_ids is not None:
+                q_rec = q_rec.filter(models.Operation.destination_location_id.in_(target_location_ids))
+            q_rec = apply_op_category(q_rec)
+            pending_receipts_count = q_rec.count()
+
+    # Pending Deliveries (draft deliveries)
+    pending_deliveries_count = 0
+    if (operation_type is None or operation_type.strip().lower() == "delivery") and (
+        status is None or status.strip().lower() == "draft"
+    ):
+        if target_location_ids is not None and not target_location_ids:
+            pending_deliveries_count = 0
+        else:
+            q_del = db.query(models.Operation).filter(
+                models.Operation.operation_type == "delivery",
+                models.Operation.status == "draft",
+            )
+            if target_location_ids is not None:
+                q_del = q_del.filter(models.Operation.source_location_id.in_(target_location_ids))
+            q_del = apply_op_category(q_del)
+            pending_deliveries_count = q_del.count()
+
+    # Scheduled Transfers (draft transfers)
+    scheduled_transfers_count = 0
+    if (operation_type is None or operation_type.strip().lower() == "transfer") and (
+        status is None or status.strip().lower() == "draft"
+    ):
+        if target_location_ids is not None and not target_location_ids:
+            scheduled_transfers_count = 0
+        else:
+            q_trf = db.query(models.Operation).filter(
+                models.Operation.operation_type == "transfer",
+                models.Operation.status == "draft",
+            )
+            if target_location_ids is not None:
+                q_trf = q_trf.filter(
+                    or_(
+                        models.Operation.source_location_id.in_(target_location_ids),
+                        models.Operation.destination_location_id.in_(target_location_ids),
+                    )
+                )
+            q_trf = apply_op_category(q_trf)
+            scheduled_transfers_count = q_trf.count()
+
+    # 5. Recent operations
+    recent_ops_query = db.query(models.Operation)
+    if operation_type and operation_type.strip():
+        recent_ops_query = recent_ops_query.filter(
+            models.Operation.operation_type == operation_type.strip().lower()
+        )
+    if status and status.strip():
+        recent_ops_query = recent_ops_query.filter(
+            models.Operation.status == status.strip().lower()
+        )
+    if target_location_ids is not None:
+        if not target_location_ids:
+            recent_ops_query = recent_ops_query.filter(False)
+        else:
+            recent_ops_query = recent_ops_query.filter(
+                or_(
+                    models.Operation.location_id.in_(target_location_ids),
+                    models.Operation.source_location_id.in_(target_location_ids),
+                    models.Operation.destination_location_id.in_(target_location_ids),
+                )
+            )
+    recent_ops_query = apply_op_category(recent_ops_query)
+    recent_operations = recent_ops_query.order_by(models.Operation.id.desc()).limit(10).all()
+
+    return schemas.DashboardResponse(
+        total_products_in_stock=total_products_in_stock,
+        low_stock_count=low_stock_count,
+        out_of_stock_count=out_of_stock_count,
+        pending_receipts_count=pending_receipts_count,
+        pending_deliveries_count=pending_deliveries_count,
+        scheduled_transfers_count=scheduled_transfers_count,
+        low_stock_products=low_stock_products,
+        recent_operations=recent_operations,
+        total_products=len(relevant_products),
+        total_inventory_quantity=total_inventory_quantity,
+    )
+
+
+@app.get(
+    "/alerts/low-stock",
+    response_model=List[schemas.LowStockProductItem],
+    tags=["Dashboard & Alerts"],
+    summary="Get low-stock and out-of-stock product alerts",
+)
+@app.get(
+    "/api/alerts/low-stock",
+    response_model=List[schemas.LowStockProductItem],
+    include_in_schema=False,
+)
+def get_low_stock_alerts(
+    warehouse_id: Optional[int] = Query(None, description="Filter alerts by warehouse ID"),
+    location_id: Optional[int] = Query(None, description="Filter alerts by location ID"),
+    category: Optional[str] = Query(None, description="Filter alerts by product category"),
+    status: Optional[str] = Query(None, description="Filter by status: 'low_stock' (default), 'out_of_stock', or 'all'"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieve products with low-stock or out-of-stock alerts:
+    - Low stock: available quantity > 0 and <= reorder_level
+    - Out of stock: available quantity == 0
+    Returns dynamic data backed by SQLite queries with useful empty states when no data exists.
+    """
+    target_location_ids = None
+    if location_id is not None and warehouse_id is not None:
+        loc = db.query(models.Location).filter(
+            models.Location.id == location_id,
+            models.Location.warehouse_id == warehouse_id,
+        ).first()
+        target_location_ids = [location_id] if loc else []
+    elif location_id is not None:
+        loc = db.query(models.Location).filter(models.Location.id == location_id).first()
+        target_location_ids = [location_id] if loc else []
+    elif warehouse_id is not None:
+        locs = db.query(models.Location.id).filter(models.Location.warehouse_id == warehouse_id).all()
+        target_location_ids = [loc[0] for loc in locs]
+
+    if target_location_ids is not None and not target_location_ids:
+        return []
+
+    prod_q = db.query(models.Product)
+    if category and category.strip():
+        prod_q = prod_q.filter(func.lower(models.Product.category) == category.strip().lower())
+    products = prod_q.all()
+    if not products:
+        return []
+    prod_map = {p.id: p for p in products}
+
+    stock_q = db.query(models.StockLevel).filter(models.StockLevel.product_id.in_(prod_map.keys()))
+    if target_location_ids is not None:
+        stock_q = stock_q.filter(models.StockLevel.location_id.in_(target_location_ids))
+    stock_levels = stock_q.all()
+
+    stock_map = {}
+    for sl in stock_levels:
+        stock_map.setdefault(sl.product_id, []).append(sl)
+
+    filter_mode = (status or "low_stock").strip().lower()
+    alerts = []
+
+    # 1. Low stock items (0 < avail <= reorder_level)
+    if filter_mode in ("low_stock", "all", "both"):
+        for sl in stock_levels:
+            prod = prod_map.get(sl.product_id)
+            if not prod:
+                continue
+            avail = max(0.0, sl.quantity - (sl.reserved_quantity or 0.0))
+            reorder_lvl = prod.reorder_level if prod.reorder_level > 0.0 else (
+                sl.reorder_threshold if sl.reorder_threshold > 0.0 else 0.0
+            )
+            if reorder_lvl > 0.0 and 0.0 < avail <= reorder_lvl:
+                loc_name = sl.location.name if sl.location else f"Location #{sl.location_id}"
+                wh_id = sl.location.warehouse_id if sl.location else None
+                wh_name = sl.location.warehouse.name if (sl.location and sl.location.warehouse) else None
+                alerts.append(
+                    schemas.LowStockProductItem(
+                        product_id=prod.id,
+                        product_name=prod.name,
+                        name=prod.name,
+                        sku=prod.sku,
+                        category=prod.category,
+                        available_quantity=avail,
+                        quantity=avail,
+                        reorder_level=reorder_lvl,
+                        location_id=sl.location_id,
+                        location=loc_name,
+                        warehouse_id=wh_id,
+                        warehouse_name=wh_name,
+                        unit_of_measure=prod.unit_of_measure,
+                        status="low_stock",
+                    )
+                )
+
+    # 2. Out of stock items (available_quantity == 0)
+    if filter_mode in ("out_of_stock", "all", "both"):
+        for prod in products:
+            p_levels = stock_map.get(prod.id, [])
+            total_avail = sum(max(0.0, sl.quantity - (sl.reserved_quantity or 0.0)) for sl in p_levels)
+            if total_avail == 0.0:
+                loc_name = "N/A"
+                loc_id = None
+                wh_id = None
+                wh_name = None
+                if p_levels:
+                    loc_name = p_levels[0].location.name if p_levels[0].location else f"Location #{p_levels[0].location_id}"
+                    loc_id = p_levels[0].location_id
+                    wh_id = p_levels[0].location.warehouse_id if p_levels[0].location else None
+                    wh_name = p_levels[0].location.warehouse.name if (p_levels[0].location and p_levels[0].location.warehouse) else None
+                elif target_location_ids and len(target_location_ids) == 1:
+                    single_loc = db.query(models.Location).filter(models.Location.id == target_location_ids[0]).first()
+                    if single_loc:
+                        loc_name = single_loc.name
+                        loc_id = single_loc.id
+                        wh_id = single_loc.warehouse_id
+                        wh_name = single_loc.warehouse.name if single_loc.warehouse else None
+
+                reorder_lvl = prod.reorder_level if prod.reorder_level > 0.0 else (
+                    p_levels[0].reorder_threshold if p_levels and p_levels[0].reorder_threshold > 0.0 else 0.0
+                )
+                alerts.append(
+                    schemas.LowStockProductItem(
+                        product_id=prod.id,
+                        product_name=prod.name,
+                        name=prod.name,
+                        sku=prod.sku,
+                        category=prod.category,
+                        available_quantity=0.0,
+                        quantity=0.0,
+                        reorder_level=reorder_lvl,
+                        location_id=loc_id,
+                        location=loc_name,
+                        warehouse_id=wh_id,
+                        warehouse_name=wh_name,
+                        unit_of_measure=prod.unit_of_measure,
+                        status="out_of_stock",
+                    )
+                )
+
+    return alerts[skip : skip + limit]
 
 
 # Warehouse Endpoints

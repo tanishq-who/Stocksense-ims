@@ -227,3 +227,39 @@ The server starts at `http://127.0.0.1:8000`.
 - **Warehouses**: `POST /api/warehouses`, `GET /api/warehouses`, `GET /api/warehouses/{id}`
 - **Locations**: `POST /api/locations`, `GET /api/locations`, `GET /api/locations/{id}`
 - **Stock Levels**: `POST /api/stock-levels`, `GET /api/stock-levels`, `GET /api/stock-levels/{id}`
+
+### Dashboard & Inventory Alerts
+
+#### Dashboard Overview
+- **`GET /dashboard`** (also available at `GET /api/dashboard`)
+  - Aggregates real-time, SQLite-backed inventory KPI metrics and recent operations.
+  - **Optional Query Filters**:
+    - `operation_type`: Filter operations by type (`receipt`, `delivery`, `transfer`, `adjustment`)
+    - `status`: Filter operations by status (`draft`, `done`, `cancelled`)
+    - `warehouse_id`: Filter stock metrics and operations by warehouse ID
+    - `location_id`: Filter stock metrics and operations by location ID
+    - `category`: Filter products, stock metrics, and operations by category
+  - **Response Fields**:
+    - `total_products_in_stock`: Count of products with available quantity > 0
+    - `low_stock_count`: Number of items where `0 < available_quantity <= reorder_level`
+    - `out_of_stock_count`: Count of products where available quantity == 0
+    - `pending_receipts_count`: Number of pending (draft) receipts
+    - `pending_deliveries_count`: Number of pending (draft) deliveries
+    - `scheduled_transfers_count`: Number of scheduled (draft) transfers
+    - `low_stock_products`: Detailed list of low-stock items with `product_name`, `sku`, `available_quantity`, `reorder_level`, and `location`
+    - `recent_operations`: List of recent operations matching filters
+  - Returns useful empty states (0 counts and empty arrays `[]`) when no data matches.
+
+#### Low-Stock & Out-of-Stock Alerts
+- **`GET /alerts/low-stock`** (also available at `GET /api/alerts/low-stock`)
+  - Provides active threshold alerts based on real database stock levels:
+    - **Low Stock**: `available_quantity > 0 and available_quantity <= reorder_level`
+    - **Out of Stock**: `available_quantity == 0`
+  - **Optional Query Filters**:
+    - `warehouse_id`: Filter alerts by warehouse ID
+    - `location_id`: Filter alerts by location ID
+    - `category`: Filter alerts by product category
+    - `status`: Alert status filter: `'low_stock'` (default), `'out_of_stock'`, or `'all'`
+    - `skip`: Pagination offset (default: 0)
+    - `limit`: Pagination limit (default: 100, max: 500)
+  - Returns a list of alert items or an empty list `[]` when no alerts exist.

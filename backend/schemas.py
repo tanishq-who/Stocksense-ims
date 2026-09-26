@@ -261,3 +261,46 @@ class InsufficientStockItem(BaseModel):
     requested_quantity: float
     available_quantity: float
     shortage: float
+
+
+# Dashboard & Alert Schemas
+class LowStockProductItem(BaseModel):
+    product_id: int
+    product_name: str
+    name: Optional[str] = None
+    sku: str
+    category: Optional[str] = None
+    available_quantity: float
+    quantity: Optional[float] = None
+    reorder_level: float
+    location_id: Optional[int] = None
+    location: str
+    warehouse_id: Optional[int] = None
+    warehouse_name: Optional[str] = None
+    unit_of_measure: Optional[str] = "pcs"
+    status: str = "low_stock"
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="after")
+    def populate_aliases(self):
+        if self.name is None:
+            self.name = self.product_name
+        if self.quantity is None:
+            self.quantity = self.available_quantity
+        return self
+
+
+class DashboardResponse(BaseModel):
+    total_products_in_stock: int
+    low_stock_count: int
+    out_of_stock_count: int
+    pending_receipts_count: int
+    pending_deliveries_count: int
+    scheduled_transfers_count: int
+    low_stock_products: List[LowStockProductItem] = []
+    recent_operations: List[OperationResponse] = []
+    total_products: Optional[int] = None
+    total_inventory_quantity: Optional[float] = None
+
+    model_config = ConfigDict(from_attributes=True)

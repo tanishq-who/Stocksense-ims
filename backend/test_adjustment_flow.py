@@ -1,4 +1,5 @@
 import sys
+import uuid
 from pathlib import Path
 from fastapi.testclient import TestClient
 
@@ -22,7 +23,8 @@ def run_tests():
 
     print("\n=== 2. Setup Test Data (Product, Warehouse, Location) ===")
     # Create product
-    prod_sku = f"TEST-ADJ-{Path('.').stat().st_mtime_ns % 100000}"
+    run_id = uuid.uuid4().hex[:8]
+    prod_sku = f"TEST-ADJ-{run_id}"
     prod_res = client.post("/products", json={
         "name": "Adjustable Widget",
         "sku": prod_sku,
@@ -38,9 +40,9 @@ def run_tests():
     print(f"Created Product #{prod_id} (SKU: {prod_sku})")
 
     # Create warehouse and location
-    wh_code = f"WH-ADJ-{Path('.').stat().st_mtime_ns % 10000}"
+    wh_code = f"WH-ADJ-{run_id}"
     wh_res = client.post("/api/warehouses", json={
-        "name": "Adjustment Warehouse",
+        "name": f"Adjustment Warehouse {run_id}",
         "code": wh_code,
         "address": "100 Quality Control Rd"
     })
@@ -50,8 +52,8 @@ def run_tests():
 
     loc_res = client.post("/api/locations", json={
         "warehouse_id": wh_id,
-        "name": "Main Storage Bay A",
-        "code": f"BAY-A-{Path('.').stat().st_mtime_ns % 1000}",
+        "name": f"Main Storage Bay A {run_id}",
+        "code": f"BAY-A-{run_id}",
         "location_type": "storage"
     })
     assert loc_res.status_code == 201, f"Failed to create location: {loc_res.text}"
