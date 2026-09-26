@@ -8,6 +8,7 @@ import { ReceiptsPage } from './pages/ReceiptsPage';
 import { TransfersPage } from './pages/TransfersPage';
 import { AdjustmentsPage } from './pages/AdjustmentsPage';
 import { MoveHistoryPage } from './pages/MoveHistoryPage';
+import { SettingsPage } from './pages/SettingsPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 
 export const App: React.FC = () => {
@@ -34,17 +35,7 @@ export const App: React.FC = () => {
           />
           <Route path="/products" element={<ProductsPage />} />
           <Route path="/move-history" element={<MoveHistoryPage />} />
-          <Route
-            path="/settings"
-            element={
-              <PlaceholderPage
-                title="System Settings"
-                section="Configuration"
-                description="Configure warehouse nodes, gate telemetry sensors, user roles, and barcode standards."
-                icon="settings"
-              />
-            }
-          />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route
             path="/profile"
             element={
