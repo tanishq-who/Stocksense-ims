@@ -117,6 +117,14 @@ export const RecentOperationsTable: React.FC<RecentOperationsTableProps> = ({
     );
   };
 
+  const getOpRoute = (opType?: string) => {
+    const t = (opType || '').toLowerCase();
+    if (t === 'receipt') return '/operations/receipts';
+    if (t === 'transfer') return '/operations/transfers';
+    if (t === 'adjustment') return '/operations/adjustments';
+    return '/operations/deliveries';
+  };
+
   return (
     <div className="bg-surface-container-lowest rounded-xl shadow-sm overflow-hidden flex flex-col border border-outline-variant/20">
       {/* Header */}
@@ -128,10 +136,10 @@ export const RecentOperationsTable: React.FC<RecentOperationsTableProps> = ({
           </p>
         </div>
         <Link
-          to="/operations/deliveries"
+          to="/move-history"
           className="text-primary hover:text-primary-container font-body-sm text-body-sm font-semibold flex items-center gap-1"
         >
-          <span>View Full Log</span>
+          <span>View Move History</span>
           <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
         </Link>
       </div>
@@ -157,28 +165,33 @@ export const RecentOperationsTable: React.FC<RecentOperationsTableProps> = ({
                 </td>
               </tr>
             ) : (
-              pagedOps.map((op) => (
-                <tr key={op.id} className="hover:bg-surface-container-low/40 transition-colors">
-                  <td className="py-2.5 px-4 font-label-code text-label-code font-bold text-primary font-mono">
-                    {op.reference}
-                  </td>
-                  <td className="py-2.5 px-3">{getOpBadge(op.operation_type)}</td>
-                  <td className="py-2.5 px-3">{getRouteLabel(op)}</td>
-                  <td className="py-2.5 px-3 font-label-code text-label-code text-on-surface-variant font-mono">
-                    {formatDate(op.scheduled_date || op.created_at)}
-                  </td>
-                  <td className="py-2.5 px-3">{getStatusBadge(op.status)}</td>
-                  <td className="py-2.5 px-3 text-right">
-                    <Link
-                      to="/operations/deliveries"
-                      className="p-1 rounded text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors inline-block"
-                      title="Inspect Operation"
-                    >
-                      <span className="material-symbols-outlined text-[18px]">more_vert</span>
-                    </Link>
-                  </td>
-                </tr>
-              ))
+              pagedOps.map((op) => {
+                const targetRoute = getOpRoute(op.operation_type);
+                return (
+                  <tr key={op.id} className="hover:bg-surface-container-low/40 transition-colors">
+                    <td className="py-2.5 px-4 font-label-code text-label-code font-bold text-primary font-mono">
+                      <Link to={targetRoute} className="hover:underline">
+                        {op.reference}
+                      </Link>
+                    </td>
+                    <td className="py-2.5 px-3">{getOpBadge(op.operation_type)}</td>
+                    <td className="py-2.5 px-3">{getRouteLabel(op)}</td>
+                    <td className="py-2.5 px-3 font-label-code text-label-code text-on-surface-variant font-mono">
+                      {formatDate(op.scheduled_date || op.created_at)}
+                    </td>
+                    <td className="py-2.5 px-3">{getStatusBadge(op.status)}</td>
+                    <td className="py-2.5 px-3 text-right">
+                      <Link
+                        to={targetRoute}
+                        className="p-1 rounded text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-colors inline-block"
+                        title={`View ${op.operation_type || 'Operation'}`}
+                      >
+                        <span className="material-symbols-outlined text-[18px]">open_in_new</span>
+                      </Link>
+                    </td>
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>

@@ -10,13 +10,16 @@ import { LoadingState } from '../components/common/LoadingState';
 import { EmptyState } from '../components/common/EmptyState';
 import { ErrorState } from '../components/common/ErrorState';
 import { NewDeliveryModal } from '../components/delivery/NewDeliveryModal';
+import { DeliveryDetailModal } from '../components/delivery/DeliveryDetailModal';
 import { deliveryService } from '../api/deliveryService';
+import { API_BASE_URL } from '../api/client';
 import { Delivery, CreateDeliveryInput } from '../types/delivery';
 
 export const DeliveryPage: React.FC = () => {
   const [uiState, setUiState] = useState<UiState>('live');
   const [viewMode, setViewMode] = useState<'table' | 'card'>('table');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [selectedDelivery, setSelectedDelivery] = useState<Delivery | null>(null);
 
   // Data & Filter State
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
@@ -95,6 +98,13 @@ export const DeliveryPage: React.FC = () => {
   const waitingCount = deliveries.filter((d) => d.status === 'Waiting').length;
   const draftCount = deliveries.filter((d) => d.status === 'Draft').length;
 
+  // Handle Delivery Validation
+  const handleValidateDelivery = async (delivery: Delivery) => {
+    const updated = await deliveryService.validateDelivery(delivery.id);
+    await loadDeliveries();
+    setSelectedDelivery(updated);
+  };
+
   return (
     <div className="flex flex-col w-full pb-12">
       {/* State Inspector ribbon matching Stitch reference */}
@@ -141,9 +151,9 @@ export const DeliveryPage: React.FC = () => {
       {uiState === 'error' && (
         <ErrorState
           title="Backend Connection Issue"
-          message={errorMessage || 'Failed to load delivery operations from FastAPI backend service at http://127.0.0.1:8000.'}
+          message={errorMessage || `Failed to load delivery operations from FastAPI backend service at ${API_BASE_URL}.`}
           onRetry={handleRetry}
-          onDiagnostics={() => alert(`Diagnostics: Target endpoint is http://127.0.0.1:8000/operations?operation_type=delivery. Error: ${errorMessage || 'None'}`)}
+          onDiagnostics={() => alert(`Diagnostics: Target endpoint is ${API_BASE_URL}/operations?operation_type=delivery. Error: ${errorMessage || 'None'}`)}
         />
       )}
 
@@ -168,16 +178,12 @@ export const DeliveryPage: React.FC = () => {
               {viewMode === 'table' ? (
                 <DeliveryTable
                   deliveries={deliveries}
-                  onSelectDelivery={(d) => {
-                    console.log('Selected delivery:', d);
-                  }}
+                  onSelectDelivery={(d) => setSelectedDelivery(d)}
                 />
               ) : (
                 <DeliveryCardView
                   deliveries={deliveries}
-                  onSelectDelivery={(d) => {
-                    console.log('Selected delivery:', d);
-                  }}
+                  onSelectDelivery={(d) => setSelectedDelivery(d)}
                 />
               )}
 
@@ -203,6 +209,13 @@ export const DeliveryPage: React.FC = () => {
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onSubmit={handleCreateDelivery}
+      />
+
+      {/* Delivery Detail & Validation Modal */}
+      <DeliveryDetailModal
+        delivery={selectedDelivery}
+        onClose={() => setSelectedDelivery(null)}
+        onValidate={handleValidateDelivery}
       />
     </div>
   );

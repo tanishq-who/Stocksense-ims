@@ -11,6 +11,7 @@ import { ReceiptCardView } from '../components/receipts/ReceiptCardView';
 import { NewReceiptModal } from '../components/receipts/NewReceiptModal';
 import { ReceiptDetailModal } from '../components/receipts/ReceiptDetailModal';
 import { receiptService } from '../api/receiptService';
+import { API_BASE_URL } from '../api/client';
 import { Receipt, CreateReceiptInput } from '../types/receipt';
 import { BackendLocation, BackendProduct } from '../types/delivery';
 
@@ -343,7 +344,7 @@ export const ReceiptsPage: React.FC = () => {
           title="Backend Connection Issue"
           message={
             errorMessage ||
-            'Failed to load inbound receipt operations from FastAPI backend service at http://127.0.0.1:8000.'
+            `Failed to load inbound receipt operations from FastAPI backend service at ${API_BASE_URL}.`
           }
           onRetry={handleRetry}
           onDiagnostics={() =>

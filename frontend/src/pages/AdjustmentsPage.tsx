@@ -12,6 +12,7 @@ import { AdjustmentCardView } from '../components/adjustments/AdjustmentCardView
 import { NewAdjustmentModal } from '../components/adjustments/NewAdjustmentModal';
 import { AdjustmentDetailModal } from '../components/adjustments/AdjustmentDetailModal';
 import { adjustmentService, LocationStockLevel } from '../api/adjustmentService';
+import { API_BASE_URL } from '../api/client';
 import { Adjustment, CreateAdjustmentInput } from '../types/adjustment';
 import { BackendLocation, BackendProduct } from '../types/delivery';
 
@@ -404,7 +405,7 @@ export const AdjustmentsPage: React.FC = () => {
           title="Adjustment Sync Failed"
           message={
             errorMessage ||
-            'Unable to connect to the FastAPI inventory adjustment service at http://127.0.0.1:8000.'
+            `Unable to connect to the FastAPI inventory adjustment service at ${API_BASE_URL}.`
           }
           onRetry={handleRetry}
           onDiagnostics={() =>

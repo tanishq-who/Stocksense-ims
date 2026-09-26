@@ -7,6 +7,14 @@ export const Header: React.FC = () => {
   const { user, logout } = useAuth();
   const [isOperationsOpen, setIsOperationsOpen] = useState(false);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  // Close menus on route change
+  React.useEffect(() => {
+    setIsMobileMenuOpen(false);
+    setIsOperationsOpen(false);
+    setIsProfileOpen(false);
+  }, [location.pathname]);
 
   const getInitials = (name?: string) => {
     if (!name) return 'OP';
@@ -247,9 +255,129 @@ export const Header: React.FC = () => {
                 </button>
               </div>
             )}
+            {/* Mobile Menu Hamburger Button */}
+            <button
+              type="button"
+              onClick={() => setIsMobileMenuOpen((prev) => !prev)}
+              aria-label={isMobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
+              className="md:hidden p-1.5 rounded-lg text-on-surface-variant hover:text-on-surface hover:bg-surface-container-low transition-colors cursor-pointer"
+            >
+              <span className="material-symbols-outlined text-[24px]">
+                {isMobileMenuOpen ? 'close' : 'menu'}
+              </span>
+            </button>
           </div>
         </div>
       </div>
+
+      {/* Mobile Navigation Dropdown Menu */}
+      {isMobileMenuOpen && (
+        <div className="md:hidden bg-surface-container-lowest border-b border-outline-variant/30 px-margin py-3 shadow-lg flex flex-col gap-1 animate-in fade-in slide-in-from-top-2 duration-150">
+          <NavLink
+            to="/dashboard"
+            onClick={() => setIsMobileMenuOpen(false)}
+            className={({ isActive }) =>
+              `px-3 py-2 rounded-lg text-body-md font-medium flex items-center gap-2.5 transition-colors ${
+                isActive ? 'bg-primary text-white' : 'text-on-surface hover:bg-surface-container'
+              }`
+            }
+          >
+            <span className="material-symbols-outlined text-[18px]">dashboard</span>
+            <span>Dashboard</span>
+          </NavLink>
+
+          <div className="px-3 pt-2 pb-1 font-label-caps text-[10px] text-outline uppercase tracking-wider">
+            Operations
+          </div>
+          <NavLink
+            to="/operations/deliveries"
+            onClick={() => setIsMobileMenuOpen(false)}
+            className={({ isActive }) =>
+              `px-3 py-2 pl-6 rounded-lg text-body-md font-medium flex items-center gap-2.5 transition-colors ${
+                isActive ? 'bg-primary-container text-white' : 'text-on-surface hover:bg-surface-container'
+              }`
+            }
+          >
+            <span className="material-symbols-outlined text-[18px] text-primary">local_shipping</span>
+            <span>Deliveries</span>
+          </NavLink>
+          <NavLink
+            to="/operations/receipts"
+            onClick={() => setIsMobileMenuOpen(false)}
+            className={({ isActive }) =>
+              `px-3 py-2 pl-6 rounded-lg text-body-md font-medium flex items-center gap-2.5 transition-colors ${
+                isActive ? 'bg-primary-container text-white' : 'text-on-surface hover:bg-surface-container'
+              }`
+            }
+          >
+            <span className="material-symbols-outlined text-[18px] text-secondary">call_received</span>
+            <span>Receipts</span>
+          </NavLink>
+          <NavLink
+            to="/operations/transfers"
+            onClick={() => setIsMobileMenuOpen(false)}
+            className={({ isActive }) =>
+              `px-3 py-2 pl-6 rounded-lg text-body-md font-medium flex items-center gap-2.5 transition-colors ${
+                isActive ? 'bg-primary-container text-white' : 'text-on-surface hover:bg-surface-container'
+              }`
+            }
+          >
+            <span className="material-symbols-outlined text-[18px] text-tertiary">swap_horiz</span>
+            <span>Transfers</span>
+          </NavLink>
+          <NavLink
+            to="/operations/adjustments"
+            onClick={() => setIsMobileMenuOpen(false)}
+            className={({ isActive }) =>
+              `px-3 py-2 pl-6 rounded-lg text-body-md font-medium flex items-center gap-2.5 transition-colors ${
+                isActive ? 'bg-primary-container text-white' : 'text-on-surface hover:bg-surface-container'
+              }`
+            }
+          >
+            <span className="material-symbols-outlined text-[18px] text-outline">rule</span>
+            <span>Adjustments</span>
+          </NavLink>
+
+          <div className="border-t border-surface-container my-1" />
+
+          <NavLink
+            to="/products"
+            onClick={() => setIsMobileMenuOpen(false)}
+            className={({ isActive }) =>
+              `px-3 py-2 rounded-lg text-body-md font-medium flex items-center gap-2.5 transition-colors ${
+                isActive ? 'bg-primary text-white' : 'text-on-surface hover:bg-surface-container'
+              }`
+            }
+          >
+            <span className="material-symbols-outlined text-[18px]">inventory_2</span>
+            <span>Products</span>
+          </NavLink>
+          <NavLink
+            to="/move-history"
+            onClick={() => setIsMobileMenuOpen(false)}
+            className={({ isActive }) =>
+              `px-3 py-2 rounded-lg text-body-md font-medium flex items-center gap-2.5 transition-colors ${
+                isActive ? 'bg-primary text-white' : 'text-on-surface hover:bg-surface-container'
+              }`
+            }
+          >
+            <span className="material-symbols-outlined text-[18px]">history</span>
+            <span>Move History</span>
+          </NavLink>
+          <NavLink
+            to="/settings"
+            onClick={() => setIsMobileMenuOpen(false)}
+            className={({ isActive }) =>
+              `px-3 py-2 rounded-lg text-body-md font-medium flex items-center gap-2.5 transition-colors ${
+                isActive ? 'bg-primary text-white' : 'text-on-surface hover:bg-surface-container'
+              }`
+            }
+          >
+            <span className="material-symbols-outlined text-[18px]">settings</span>
+            <span>Settings</span>
+          </NavLink>
+        </div>
+      )}
     </header>
   );
 };

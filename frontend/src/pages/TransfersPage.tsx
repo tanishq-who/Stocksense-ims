@@ -12,6 +12,7 @@ import { TransferCardView } from '../components/transfers/TransferCardView';
 import { NewTransferModal } from '../components/transfers/NewTransferModal';
 import { TransferDetailModal } from '../components/transfers/TransferDetailModal';
 import { transferService, LocationStock } from '../api/transferService';
+import { API_BASE_URL } from '../api/client';
 import { Transfer, CreateTransferInput } from '../types/transfer';
 import { BackendLocation, BackendProduct } from '../types/delivery';
 
@@ -388,7 +389,7 @@ export const TransfersPage: React.FC = () => {
           title="Transfer Sync Telemetry Failed"
           message={
             errorMessage ||
-            'Node 04 (Bay 08 Transfer Hub) was unable to pull recent inventory route changes from FastAPI backend service at http://127.0.0.1:8000.'
+            `Unable to pull inventory transfer changes from FastAPI backend service at ${API_BASE_URL}.`
           }
           onRetry={handleRetry}
           onDiagnostics={() =>
