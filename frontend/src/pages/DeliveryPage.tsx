@@ -30,7 +30,10 @@ export const DeliveryPage: React.FC = () => {
   const [totalItems, setTotalItems] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
 
-  // Fetch Deliveries
+  // Error message state
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Fetch Deliveries from FastAPI backend
   const loadDeliveries = useCallback(async () => {
     try {
       const response = await deliveryService.getDeliveries({
@@ -44,9 +47,11 @@ export const DeliveryPage: React.FC = () => {
       setDeliveries(response.items);
       setTotalItems(response.total);
       setTotalPages(response.totalPages);
-
-      // If user is in live mode and no items returned, we show empty state or table
-    } catch {
+      setErrorMessage(null);
+      setUiState((prev) => (prev === 'loading' || prev === 'error' ? 'live' : prev));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to connect to FastAPI backend.';
+      setErrorMessage(msg);
       setUiState('error');
     }
   }, [searchTerm, selectedStatus, selectedWarehouse, currentPage, pageSize]);
@@ -67,8 +72,7 @@ export const DeliveryPage: React.FC = () => {
     setUiState('loading');
     setTimeout(() => {
       loadDeliveries();
-      setUiState('live');
-    }, 600);
+    }, 400);
   };
 
   const handleClearFilters = () => {
@@ -79,7 +83,7 @@ export const DeliveryPage: React.FC = () => {
     setUiState('live');
   };
 
-  // Calculate live counts for Bento KPI cluster
+  // Calculate live counts for Bento KPI cluster from real backend operations
   const readyCount = deliveries.filter((d) => d.status === 'Ready').length;
   const waitingCount = deliveries.filter((d) => d.status === 'Waiting').length;
   const draftCount = deliveries.filter((d) => d.status === 'Draft').length;
@@ -94,9 +98,9 @@ export const DeliveryPage: React.FC = () => {
 
       {/* KPI Bento Metrics Cluster */}
       <DeliveryMetrics
-        readyCount={readyCount > 0 ? readyCount : 24}
-        waitingCount={waitingCount > 0 ? waitingCount : 12}
-        draftCount={draftCount > 0 ? draftCount : 8}
+        readyCount={readyCount}
+        waitingCount={waitingCount}
+        draftCount={draftCount}
         onNewDeliveryClick={() => setIsModalOpen(true)}
         onExportCsv={() => alert('Exporting Outbound Deliveries Manifest (CSV)...')}
         onPrintBatch={() => window.print()}
@@ -129,8 +133,10 @@ export const DeliveryPage: React.FC = () => {
 
       {uiState === 'error' && (
         <ErrorState
+          title="Backend Connection Issue"
+          message={errorMessage || 'Failed to load delivery operations from FastAPI backend service at http://127.0.0.1:8000.'}
           onRetry={handleRetry}
-          onDiagnostics={() => alert('Diagnostics: Telemetry socket NODE_04 handshake trace normal.')}
+          onDiagnostics={() => alert(`Diagnostics: Target endpoint is http://127.0.0.1:8000/operations?operation_type=delivery. Error: ${errorMessage || 'None'}`)}
         />
       )}
 

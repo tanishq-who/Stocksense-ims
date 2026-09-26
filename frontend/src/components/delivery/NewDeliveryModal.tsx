@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Modal } from '../common/Modal';
-import { CreateDeliveryInput, DeliveryStatus } from '../../types/delivery';
+import { CreateDeliveryInput, DeliveryStatus, BackendLocation, BackendProduct } from '../../types/delivery';
+import { deliveryService } from '../../api/deliveryService';
 
 interface NewDeliveryModalProps {
   isOpen: boolean;
@@ -10,6 +11,7 @@ interface NewDeliveryModalProps {
 
 interface ProductLineItem {
   id: string;
+  productId?: number;
   productName: string;
   quantity: number;
   unit: string;
@@ -20,6 +22,9 @@ export const NewDeliveryModal: React.FC<NewDeliveryModalProps> = ({
   onClose,
   onSubmit,
 }) => {
+  const [locations, setLocations] = useState<BackendLocation[]>([]);
+  const [products, setProducts] = useState<BackendProduct[]>([]);
+  const [selectedLocationId, setSelectedLocationId] = useState<number | undefined>(undefined);
   const [fromLocation, setFromLocation] = useState('Main Warehouse');
   const [toDestination, setToDestination] = useState('');
   const [contactName, setContactName] = useState('');
@@ -35,8 +40,31 @@ export const NewDeliveryModal: React.FC<NewDeliveryModalProps> = ({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  useEffect(() => {
+    if (isOpen) {
+      deliveryService.getLocations().then((locs) => {
+        if (locs && locs.length > 0) {
+          setLocations(locs);
+          setSelectedLocationId(locs[0].id);
+          setFromLocation(locs[0].name);
+        }
+      });
+      deliveryService.getProducts().then((prods) => {
+        if (prods && prods.length > 0) {
+          setProducts(prods);
+        }
+      });
+    }
+  }, [isOpen]);
+
   const resetForm = () => {
-    setFromLocation('Main Warehouse');
+    if (locations.length > 0) {
+      setFromLocation(locations[0].name);
+      setSelectedLocationId(locations[0].id);
+    } else {
+      setFromLocation('Main Warehouse');
+      setSelectedLocationId(undefined);
+    }
     setToDestination('');
     setContactName('');
     setContactRole('Delivery Courier');
@@ -46,6 +74,7 @@ export const NewDeliveryModal: React.FC<NewDeliveryModalProps> = ({
     setNotes('');
     setErrors({});
   };
+
 
   const handleClose = () => {
     resetForm();
@@ -127,11 +156,21 @@ export const NewDeliveryModal: React.FC<NewDeliveryModalProps> = ({
         contactName,
         contactRole,
         scheduledDate,
-        items: items.map((it) => ({
-          productName: it.productName.trim(),
-          quantity: Number(it.quantity),
-          unit: it.unit,
-        })),
+        sourceLocationId: selectedLocationId || locations[0]?.id || 1,
+        items: items.map((it) => {
+          const matchedProd = products.find(
+            (p) =>
+              p.name.toLowerCase() === it.productName.trim().toLowerCase() ||
+              p.sku.toLowerCase() === it.productName.trim().toLowerCase()
+          );
+          return {
+            productId: matchedProd ? matchedProd.id : (it.productId || 1),
+            productName: it.productName.trim(),
+            sku: matchedProd?.sku,
+            quantity: Number(it.quantity),
+            unit: it.unit,
+          };
+        }),
         notes: notes.trim() || undefined,
         status,
       });
@@ -163,22 +202,40 @@ export const NewDeliveryModal: React.FC<NewDeliveryModalProps> = ({
               From Location / Warehouse <span className="text-error">*</span>
             </label>
             <select
-              value={fromLocation}
+              value={selectedLocationId !== undefined ? String(selectedLocationId) : fromLocation}
               onChange={(e) => {
-                setFromLocation(e.target.value);
+                const locId = Number(e.target.value);
+                const foundLoc = locations.find((l) => l.id === locId);
+                if (foundLoc) {
+                  setSelectedLocationId(foundLoc.id);
+                  setFromLocation(foundLoc.name);
+                } else {
+                  setFromLocation(e.target.value);
+                }
                 if (errors.fromLocation) setErrors((prev) => ({ ...prev, fromLocation: '' }));
               }}
               className="w-full h-10 px-3 bg-surface-container-low border border-outline-variant/40 rounded-lg font-body-md text-body-md text-on-surface focus:outline-none focus:border-primary focus:bg-surface-container-lowest"
             >
-              <option value="Main Warehouse">Main Warehouse</option>
-              <option value="Warehouse 2">Warehouse 2</option>
-              <option value="Central Depot">Central Depot</option>
-              <option value="Cold Storage Hub">Cold Storage Hub</option>
+              {locations.length > 0 ? (
+                locations.map((loc) => (
+                  <option key={loc.id} value={String(loc.id)}>
+                    {loc.name} {loc.code ? `(${loc.code})` : ''}
+                  </option>
+                ))
+              ) : (
+                <>
+                  <option value="Main Warehouse">Main Warehouse</option>
+                  <option value="Warehouse 2">Warehouse 2</option>
+                  <option value="Central Depot">Central Depot</option>
+                  <option value="Cold Storage Hub">Cold Storage Hub</option>
+                </>
+              )}
             </select>
             {errors.fromLocation && (
               <p className="font-body-sm text-body-sm text-error mt-1">{errors.fromLocation}</p>
             )}
           </div>
+
 
           <div>
             <label className="block font-label-caps text-label-caps uppercase text-on-surface-variant font-semibold mb-1">
@@ -271,11 +328,21 @@ export const NewDeliveryModal: React.FC<NewDeliveryModalProps> = ({
                 <div className="flex-1">
                   <input
                     type="text"
+                    list="available-products"
                     placeholder={`Product name / SKU #${idx + 1}`}
                     value={item.productName}
-                    onChange={(e) =>
-                      handleProductChange(item.id, 'productName', e.target.value)
-                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      handleProductChange(item.id, 'productName', val);
+                      const matched = products.find(
+                        (p) =>
+                          p.name.toLowerCase() === val.toLowerCase() ||
+                          p.sku.toLowerCase() === val.toLowerCase()
+                      );
+                      if (matched) {
+                        handleProductChange(item.id, 'unit', matched.unit_of_measure || 'Units');
+                      }
+                    }}
                     className={`w-full h-9 px-2.5 bg-surface-container-lowest border rounded font-body-md text-body-md focus:outline-none focus:border-primary ${
                       errors[`product_${item.id}`] ? 'border-error' : 'border-outline-variant/40'
                     }`}
@@ -335,6 +402,15 @@ export const NewDeliveryModal: React.FC<NewDeliveryModalProps> = ({
               </div>
             ))}
           </div>
+
+          {/* Datalist for available products */}
+          <datalist id="available-products">
+            {products.map((p) => (
+              <option key={p.id} value={p.name}>
+                {p.sku} ({p.unit_of_measure})
+              </option>
+            ))}
+          </datalist>
         </div>
 
         {/* Optional Notes */}
