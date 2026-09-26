@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # Health Check Schema
@@ -10,12 +10,21 @@ class HealthResponse(BaseModel):
 
 # Product Schemas
 class ProductBase(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
-    sku: str = Field(..., min_length=1, max_length=100)
-    description: Optional[str] = None
-    category: Optional[str] = None
-    price: float = Field(default=0.0, ge=0.0)
-    unit_of_measure: str = Field(default="pcs", max_length=50)
+    name: str = Field(..., min_length=1, max_length=255, description="Product name (required)")
+    sku: str = Field(..., min_length=1, max_length=100, description="Stock Keeping Unit (required, unique)")
+    description: Optional[str] = Field(None, description="Product description")
+    category: Optional[str] = Field(None, max_length=100, description="Product category")
+    price: float = Field(default=0.0, ge=0.0, description="Unit price, must be >= 0")
+    unit_of_measure: str = Field(..., min_length=1, max_length=50, description="Unit of measurement (required)")
+    reorder_level: float = Field(default=0.0, ge=0.0, description="Reorder level threshold, must be >= 0")
+
+    @field_validator("name", "sku", "unit_of_measure")
+    @classmethod
+    def validate_not_blank(cls, value: str, info) -> str:
+        if not value or not value.strip():
+            field_display = info.field_name.replace("_", " ").title()
+            raise ValueError(f"{field_display} is required and cannot be empty or whitespace.")
+        return value.strip()
 
 
 class ProductCreate(ProductBase):
@@ -26,9 +35,20 @@ class ProductUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     sku: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = None
-    category: Optional[str] = None
+    category: Optional[str] = Field(None, max_length=100)
     price: Optional[float] = Field(None, ge=0.0)
-    unit_of_measure: Optional[str] = Field(None, max_length=50)
+    unit_of_measure: Optional[str] = Field(None, min_length=1, max_length=50)
+    reorder_level: Optional[float] = Field(None, ge=0.0)
+
+    @field_validator("name", "sku", "unit_of_measure")
+    @classmethod
+    def validate_not_blank_if_present(cls, value: Optional[str], info) -> Optional[str]:
+        if value is not None:
+            if not value.strip():
+                field_display = info.field_name.replace("_", " ").title()
+                raise ValueError(f"{field_display} cannot be empty or whitespace.")
+            return value.strip()
+        return value
 
 
 class ProductResponse(ProductBase):

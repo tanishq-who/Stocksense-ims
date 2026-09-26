@@ -25,6 +25,7 @@ class Product(Base):
     category = Column(String, nullable=True, index=True)
     price = Column(Float, nullable=False, default=0.0)
     unit_of_measure = Column(String, nullable=False, default="pcs")
+    reorder_level = Column(Float, nullable=False, default=0.0)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     updated_at = Column(
         DateTime,

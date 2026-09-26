@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
-from typing import List
-from fastapi import Depends, FastAPI, HTTPException, status
+from typing import List, Optional
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -12,7 +12,7 @@ import schemas
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize SQLite database tables upon startup
+    # Initialize SQLite database tables and apply migrations upon startup
     init_db()
     yield
 
@@ -41,34 +41,159 @@ def get_health():
 
 
 # Product Endpoints
-@app.post("/api/products", response_model=schemas.ProductResponse, status_code=status.HTTP_201_CREATED, tags=["Products"])
+@app.post(
+    "/products",
+    response_model=schemas.ProductResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Products"],
+    summary="Create a new product",
+)
+@app.post(
+    "/api/products",
+    response_model=schemas.ProductResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
 def create_product(product_in: schemas.ProductCreate, db: Session = Depends(get_db)):
-    """Create a new product."""
-    existing = db.query(models.Product).filter(models.Product.sku == product_in.sku).first()
-    if existing:
+    """
+    Create a new product with required validation:
+    - name and sku are required and cannot be empty
+    - sku must be unique
+    - unit_of_measure is required and cannot be empty
+    - reorder_level must be 0 or greater
+    - price must be 0 or greater
+    """
+    existing_product = db.query(models.Product).filter(models.Product.sku == product_in.sku).first()
+    if existing_product:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Product with SKU '{product_in.sku}' already exists.",
+            detail=f"Product with SKU '{product_in.sku}' already exists. SKU must be unique.",
         )
+
     product = models.Product(**product_in.model_dump())
     db.add(product)
-    db.commit()
-    db.refresh(product)
+    try:
+        db.commit()
+        db.refresh(product)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Product with SKU '{product_in.sku}' already exists. SKU must be unique.",
+        )
     return product
 
 
-@app.get("/api/products", response_model=List[schemas.ProductResponse], tags=["Products"])
-def list_products(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """List all products with pagination."""
-    return db.query(models.Product).offset(skip).limit(limit).all()
+@app.get(
+    "/products",
+    response_model=List[schemas.ProductResponse],
+    tags=["Products"],
+    summary="List all products",
+)
+@app.get(
+    "/api/products",
+    response_model=List[schemas.ProductResponse],
+    include_in_schema=False,
+)
+def list_products(
+    search: Optional[str] = Query(None, description="Search by name, SKU, or description"),
+    category: Optional[str] = Query(None, description="Filter by category"),
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(100, ge=1, le=500, description="Max number of records to return"),
+    db: Session = Depends(get_db),
+):
+    """List products with optional search query and category filtering."""
+    query = db.query(models.Product)
+    if category:
+        query = query.filter(models.Product.category.ilike(f"%{category.strip()}%"))
+    if search:
+        search_pattern = f"%{search.strip()}%"
+        query = query.filter(
+            (models.Product.name.ilike(search_pattern))
+            | (models.Product.sku.ilike(search_pattern))
+            | (models.Product.description.ilike(search_pattern))
+        )
+    return query.offset(skip).limit(limit).all()
 
 
-@app.get("/api/products/{product_id}", response_model=schemas.ProductResponse, tags=["Products"])
-def get_product(product_id: int, db: Session = Depends(get_db)):
-    """Get product by ID."""
-    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+@app.get(
+    "/products/{id}",
+    response_model=schemas.ProductResponse,
+    tags=["Products"],
+    summary="Get a product by ID",
+)
+@app.get(
+    "/api/products/{id}",
+    response_model=schemas.ProductResponse,
+    include_in_schema=False,
+)
+def get_product(id: int, db: Session = Depends(get_db)):
+    """Retrieve details for a specific product by its ID."""
+    product = db.query(models.Product).filter(models.Product.id == id).first()
     if not product:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {id} not found.",
+        )
+    return product
+
+
+@app.patch(
+    "/products/{id}",
+    response_model=schemas.ProductResponse,
+    tags=["Products"],
+    summary="Update a product by ID",
+)
+@app.patch(
+    "/api/products/{id}",
+    response_model=schemas.ProductResponse,
+    include_in_schema=False,
+)
+def patch_product(id: int, product_in: schemas.ProductUpdate, db: Session = Depends(get_db)):
+    """
+    Partially update a product by its ID.
+    Validates that:
+    - product exists
+    - sku (if provided) is unique across other products
+    - reorder_level (if provided) is >= 0
+    - string fields are not blank
+    """
+    product = db.query(models.Product).filter(models.Product.id == id).first()
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Product with ID {id} not found.",
+        )
+
+    update_data = product_in.model_dump(exclude_unset=True)
+    if not update_data:
+        return product
+
+    # If SKU is updated, ensure uniqueness across other products
+    if "sku" in update_data and update_data["sku"] != product.sku:
+        existing_sku = (
+            db.query(models.Product)
+            .filter(models.Product.sku == update_data["sku"], models.Product.id != id)
+            .first()
+        )
+        if existing_sku:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Product with SKU '{update_data['sku']}' already exists. SKU must be unique.",
+            )
+
+    for field, value in update_data.items():
+        setattr(product, field, value)
+
+    try:
+        db.commit()
+        db.refresh(product)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Integrity violation while updating product.",
+        )
     return product
 
 

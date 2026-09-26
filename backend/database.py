@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -27,5 +27,11 @@ def get_db():
 
 
 def init_db():
-    """Initializes all database tables registered in SQLAlchemy models."""
+    """Initializes all database tables registered in SQLAlchemy models and migrates schema if needed."""
     Base.metadata.create_all(bind=engine)
+    with engine.connect() as conn:
+        result = conn.execute(text("PRAGMA table_info(products)"))
+        columns = [row[1] for row in result.fetchall()]
+        if columns and "reorder_level" not in columns:
+            conn.execute(text("ALTER TABLE products ADD COLUMN reorder_level FLOAT NOT NULL DEFAULT 0.0"))
+            conn.commit()

@@ -6,9 +6,9 @@ StockSense Inventory Management System (IMS) backend service built with **FastAP
 
 - **Framework**: [FastAPI](https://fastapi.tiangolo.com/) for high-performance async REST APIs.
 - **ORM / Database**: [SQLAlchemy](https://www.sqlalchemy.org/) with persistent local [SQLite](https://www.sqlite.org/).
-- **Validation & Serialization**: [Pydantic v2](https://docs.pydantic.dev/) schemas.
+- **Validation & Serialization**: [Pydantic v2](https://docs.pydantic.dev/) schemas with clear, descriptive validation errors.
 - **CORS enabled**: Pre-configured to allow frontend integration.
-- **Automatic Schema Migration / Initialization**: SQLite tables are automatically initialized upon startup.
+- **Automatic Schema Migration / Initialization**: SQLite tables are automatically initialized and migrated upon startup.
 
 ## Data Models
 
@@ -16,12 +16,13 @@ The SQLite database (`stocksense.db`) defines relational models for real-time in
 
 1. **`Product`**:
    - `id`: Primary key
-   - `name`: Product name
-   - `sku`: Unique SKU identifier
+   - `name`: Product name (required, non-empty)
+   - `sku`: Unique SKU identifier (required, unique)
    - `description`: Optional product details
    - `category`: Product category
-   - `price`: Unit price
-   - `unit_of_measure`: Measurement unit (e.g. `pcs`, `kg`)
+   - `price`: Unit price (>= 0)
+   - `unit_of_measure`: Measurement unit (required, e.g. `pcs`, `kg`)
+   - `reorder_level`: Minimum reorder threshold (>= 0, default: 0)
    - `created_at` / `updated_at`: Timestamps
 
 2. **`Warehouse`**:
@@ -110,11 +111,24 @@ The server starts at `http://127.0.0.1:8000`.
 - **Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **ReDoc**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
 
-### Inventory APIs
-- **Products**:
-  - `POST /api/products`: Create a product
-  - `GET /api/products`: List products
-  - `GET /api/products/{product_id}`: Retrieve a product
+### Product Management APIs
+- **`GET /products`**
+  - List all products.
+  - Supports optional query parameters: `search` (name/SKU/description), `category`, `skip`, `limit`.
+- **`POST /products`**
+  - Create a new product.
+  - Validates required `name`, required unique `sku`, required `unit_of_measure`, and `reorder_level >= 0`.
+  - Returns HTTP 400 Bad Request with descriptive message if SKU already exists.
+  - Returns HTTP 422 Unprocessable Entity with clear error details if validation fails.
+- **`GET /products/{id}`**
+  - Retrieve a single product by its ID.
+  - Returns HTTP 404 Not Found if product does not exist.
+- **`PATCH /products/{id}`**
+  - Partially update a product.
+  - Validates uniqueness if SKU is modified, `reorder_level >= 0`, and non-empty strings.
+  - Returns HTTP 404 Not Found if product does not exist.
+
+### Warehouses, Locations & Stock Levels
 - **Warehouses**:
   - `POST /api/warehouses`: Create a warehouse
   - `GET /api/warehouses`: List warehouses
