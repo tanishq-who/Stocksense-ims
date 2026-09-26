@@ -38,7 +38,30 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
 
   if (!response.ok) {
     const errorBody = await response.json().catch(() => ({}));
-    const message = errorBody?.detail || errorBody?.message || `HTTP ${response.status}: ${response.statusText}`;
+    let message = `HTTP ${response.status}: ${response.statusText}`;
+
+    if (typeof errorBody?.detail === 'string') {
+      message = errorBody.detail;
+    } else if (Array.isArray(errorBody?.detail)) {
+      message = errorBody.detail
+        .map((e: any) => `${e.loc ? e.loc.filter((p: any) => p !== 'body').join('.') + ': ' : ''}${e.msg}`)
+        .join('; ');
+    } else if (errorBody?.detail && typeof errorBody.detail === 'object') {
+      if (errorBody.detail.message) {
+        message = errorBody.detail.message;
+        if (Array.isArray(errorBody.detail.shortages)) {
+          const shortageList = errorBody.detail.shortages
+            .map((s: any) => `${s.product_name || s.sku || 'Product'}: requested ${s.requested_quantity}, available ${s.available_quantity}`)
+            .join('; ');
+          message += ` (${shortageList})`;
+        }
+      } else {
+        message = JSON.stringify(errorBody.detail);
+      }
+    } else if (errorBody?.message) {
+      message = errorBody.message;
+    }
+
     throw new Error(message);
   }
 

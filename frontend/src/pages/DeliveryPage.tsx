@@ -62,7 +62,14 @@ export const DeliveryPage: React.FC = () => {
 
   // Handle New Delivery creation
   const handleCreateDelivery = async (input: CreateDeliveryInput) => {
-    await deliveryService.createDelivery(input);
+    const created = await deliveryService.createDelivery(input);
+    setCurrentPage(1);
+    if (selectedStatus !== 'All' && selectedStatus.toLowerCase() !== created.status.toLowerCase()) {
+      setSelectedStatus('All');
+    }
+    if (searchTerm) {
+      setSearchTerm('');
+    }
     await loadDeliveries();
     setUiState('live');
   };
