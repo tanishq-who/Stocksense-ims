@@ -30,8 +30,21 @@ def init_db():
     """Initializes all database tables registered in SQLAlchemy models and migrates schema if needed."""
     Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
+        # Migrate products columns if needed
         result = conn.execute(text("PRAGMA table_info(products)"))
-        columns = [row[1] for row in result.fetchall()]
-        if columns and "reorder_level" not in columns:
+        prod_columns = [row[1] for row in result.fetchall()]
+        if prod_columns and "reorder_level" not in prod_columns:
             conn.execute(text("ALTER TABLE products ADD COLUMN reorder_level FLOAT NOT NULL DEFAULT 0.0"))
-            conn.commit()
+
+        # Migrate operations columns if needed
+        result = conn.execute(text("PRAGMA table_info(operations)"))
+        op_columns = [row[1] for row in result.fetchall()]
+        if op_columns:
+            if "customer" not in op_columns:
+                conn.execute(text("ALTER TABLE operations ADD COLUMN customer VARCHAR"))
+            if "source_location_id" not in op_columns:
+                conn.execute(text("ALTER TABLE operations ADD COLUMN source_location_id INTEGER"))
+            if "scheduled_date" not in op_columns:
+                conn.execute(text("ALTER TABLE operations ADD COLUMN scheduled_date DATETIME"))
+
+        conn.commit()

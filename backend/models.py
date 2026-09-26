@@ -109,7 +109,10 @@ class Operation(Base):
     operation_type = Column(String, nullable=False, default="receipt", index=True)
     status = Column(String, nullable=False, default="draft", index=True)
     supplier = Column(String, nullable=True)
+    customer = Column(String, nullable=True)
+    source_location_id = Column(Integer, ForeignKey("locations.id", ondelete="RESTRICT"), nullable=True, index=True)
     destination_location_id = Column(Integer, ForeignKey("locations.id", ondelete="RESTRICT"), nullable=True, index=True)
+    scheduled_date = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), server_default=func.now())
     updated_at = Column(
         DateTime,
@@ -118,6 +121,7 @@ class Operation(Base):
         server_default=func.now(),
     )
 
+    source_location = relationship("Location", foreign_keys=[source_location_id])
     destination_location = relationship("Location", foreign_keys=[destination_location_id])
     lines = relationship("OperationLine", back_populates="operation", cascade="all, delete-orphan")
 

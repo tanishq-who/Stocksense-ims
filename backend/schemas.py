@@ -140,10 +140,10 @@ class StockLevelResponse(StockLevelBase):
     model_config = ConfigDict(from_attributes=True)
 
 
-# Operation & Receipt Schemas
+# Operation & Line Item Schemas
 class OperationLineCreate(BaseModel):
     product_id: int = Field(..., gt=0, description="Product ID (must be > 0)")
-    quantity: float = Field(..., gt=0.0, description="Received quantity (must be greater than 0)")
+    quantity: float = Field(..., gt=0.0, description="Quantity (must be greater than 0)")
 
 
 class OperationLineResponse(BaseModel):
@@ -155,6 +155,7 @@ class OperationLineResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# Incoming Receipt Creation Schema
 class ReceiptCreate(BaseModel):
     supplier: str = Field(..., min_length=1, max_length=255, description="Supplier name (required)")
     destination_location_id: int = Field(..., gt=0, description="Destination location ID (required)")
@@ -168,13 +169,31 @@ class ReceiptCreate(BaseModel):
         return value.strip()
 
 
+# Delivery Order Creation Schema
+class DeliveryCreate(BaseModel):
+    customer: str = Field(..., min_length=1, max_length=255, description="Customer or contact name (required)")
+    source_location_id: int = Field(..., gt=0, description="Source location ID (required)")
+    scheduled_date: Optional[datetime] = Field(None, description="Scheduled date for delivery")
+    lines: List[OperationLineCreate] = Field(..., min_length=1, description="One or more lines containing product_id and positive quantity")
+
+    @field_validator("customer")
+    @classmethod
+    def validate_customer(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Customer/contact is required and cannot be empty or whitespace.")
+        return value.strip()
+
+
 class OperationResponse(BaseModel):
     id: int
     reference: str
     operation_type: str
     status: str
     supplier: Optional[str] = None
+    customer: Optional[str] = None
+    source_location_id: Optional[int] = None
     destination_location_id: Optional[int] = None
+    scheduled_date: Optional[datetime] = None
     lines: List[OperationLineResponse] = []
     created_at: datetime
     updated_at: datetime
@@ -194,3 +213,13 @@ class StockLedgerEntryResponse(BaseModel):
     timestamp: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# Validation Error Detail Schemas
+class InsufficientStockItem(BaseModel):
+    product_id: int
+    product_name: str
+    sku: str
+    requested_quantity: float
+    available_quantity: float
+    shortage: float

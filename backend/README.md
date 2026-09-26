@@ -8,8 +8,8 @@ StockSense Inventory Management System (IMS) backend service built with **FastAP
 - **ORM / Database**: [SQLAlchemy](https://www.sqlalchemy.org/) with persistent local [SQLite](https://www.sqlite.org/).
 - **Validation & Serialization**: [Pydantic v2](https://docs.pydantic.dev/) schemas with clear, descriptive validation errors.
 - **CORS enabled**: Pre-configured to allow frontend integration.
-- **Transactional Stock Operations**: Atomic updates across stock balances and an immutable audit ledger.
-- **Automatic Schema Migration / Initialization**: SQLite tables are automatically initialized and migrated upon startup.
+- **Transactional Stock Operations**: Atomic updates across stock balances and an immutable audit ledger for both Receipts and Deliveries.
+- **Automatic Schema Migration / Initialization**: SQLite tables and columns are automatically initialized and migrated upon startup.
 
 ## Data Models
 
@@ -54,26 +54,29 @@ The SQLite database (`stocksense.db`) defines relational models for real-time in
 
 5. **`Operation`**:
    - `id`: Primary key
-   - `reference`: Unique sequential code (e.g. `REC-00001`)
-   - `operation_type`: Operation type (`receipt`, etc.)
+   - `reference`: Unique sequential code (e.g. `REC-00001`, `DEL-00001`)
+   - `operation_type`: Operation type (`receipt`, `delivery`)
    - `status`: Lifecycle state (`draft`, `done`, `cancelled`)
-   - `supplier`: Supplier name
-   - `destination_location_id`: Foreign key to `locations.id`
+   - `supplier`: Supplier name (for receipts)
+   - `customer`: Customer / contact name (for deliveries)
+   - `source_location_id`: Foreign key to `locations.id` (source for deliveries)
+   - `destination_location_id`: Foreign key to `locations.id` (destination for receipts)
+   - `scheduled_date`: Delivery scheduled date
    - `created_at` / `updated_at`: Timestamps
 
 6. **`OperationLine`**:
    - `id`: Primary key
    - `operation_id`: Foreign key to `operations.id`
    - `product_id`: Foreign key to `products.id`
-   - `quantity`: Received quantity (> 0)
+   - `quantity`: Received or delivered quantity (> 0)
 
 7. **`StockLedgerEntry`**:
    - `id`: Primary key
    - `product_id`: Foreign key to `products.id`
    - `location_id`: Foreign key to `locations.id`
    - `operation_id`: Foreign key to `operations.id`
-   - `operation_reference`: Operation reference string (e.g. `REC-00001`)
-   - `delta`: Stock change delta (positive for receipts)
+   - `operation_reference`: Operation reference string (e.g. `REC-00001`, `DEL-00001`)
+   - `delta`: Stock change delta (positive for receipts, negative for deliveries)
    - `balance_after`: Resulting stock level at location
    - `timestamp`: UTC timestamp of the transaction
 
@@ -137,7 +140,9 @@ The server starts at `http://127.0.0.1:8000`.
 - **Swagger UI**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **ReDoc**: [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
 
-### Incoming Receipt Operations
+### Inventory Operations (Receipts & Deliveries)
+
+#### Incoming Receipts
 - **`POST /operations/receipts`**
   - Creates a `draft` receipt operation.
   - Body:
@@ -153,20 +158,48 @@ The server starts at `http://127.0.0.1:8000`.
       ]
     }
     ```
-  - Validates non-empty supplier, valid destination location, valid products, and positive quantities.
+
+#### Delivery Orders
+- **`POST /operations/deliveries`**
+  - Creates a `draft` delivery order.
+  - Body:
+    ```json
+    {
+      "customer": "Customer Name",
+      "source_location_id": 1,
+      "scheduled_date": "2026-10-01T10:00:00Z",
+      "lines": [
+        {
+          "product_id": 1,
+          "quantity": 25.0
+        }
+      ]
+    }
+    ```
+
+#### Operation Validation
 - **`POST /operations/{id}/validate`**
-  - Validates a `draft` receipt atomically:
-    1. Creates or updates `StockLevel` for every product at the destination location.
-    2. Increases stock quantity by the received amount.
-    3. Records an immutable `StockLedgerEntry` with positive delta, timestamp, operation reference, location, and `balance_after`.
-    4. Marks the receipt status as `done`.
-    5. Rejects validation with HTTP 400 if already validated.
+  - Validates a `draft` receipt or delivery in a single atomic database transaction:
+    - **For Receipts**:
+      1. Creates or updates `StockLevel` at the destination location.
+      2. Increases stock quantity.
+      3. Creates immutable `StockLedgerEntry` with positive `delta` and `balance_after`.
+      4. Marks receipt `done`.
+    - **For Deliveries**:
+      1. Pre-checks stock availability across all lines before changing any stock.
+      2. If insufficient stock, returns a detailed `422 Unprocessable Content` response listing each product, requested quantity, available quantity, and shortage. No data is changed.
+      3. If stock is available, decreases `StockLevel` at the source location.
+      4. Creates immutable `StockLedgerEntry` with negative `delta` and `balance_after`.
+      5. Marks delivery `done`.
+    - Rejects validating an already `done` operation with HTTP 400.
+
+#### Operations Querying & Ledger
 - **`GET /operations`**
-  - Lists operations. Supports filtering by `status` (e.g. `draft`, `done`) and `operation_type` (e.g. `receipt`).
+  - Lists operations with optional filtering by `status` (e.g. `draft`, `done`) and `operation_type` (e.g. `receipt`, `delivery`).
 - **`GET /operations/{id}`**
-  - Retrieves a single operation with all line items.
+  - Retrieves a single operation with all lines and location details.
 - **`GET /ledger`**
-  - Lists immutable stock ledger audit records. Supports filtering by `product_id`, `location_id`, and `operation_reference`.
+  - Lists immutable stock ledger audit records with filters: `product_id`, `location_id`, `operation_reference`.
 
 ### Product Management APIs
 - **`GET /products`**: List all products (supports `search`, `category`, pagination).

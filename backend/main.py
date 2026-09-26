@@ -198,7 +198,7 @@ def patch_product(id: int, product_in: schemas.ProductUpdate, db: Session = Depe
     return product
 
 
-# Operations Endpoints (Receipts)
+# Operations Endpoints (Receipts & Deliveries)
 @app.post(
     "/operations/receipts",
     response_model=schemas.OperationResponse,
@@ -211,7 +211,6 @@ def create_receipt(receipt_in: schemas.ReceiptCreate, db: Session = Depends(get_
     Create a Draft receipt with supplier, destination_location_id, and one or more lines
     containing product_id and positive quantity.
     """
-    # Verify destination location exists
     dest_loc = db.query(models.Location).filter(models.Location.id == receipt_in.destination_location_id).first()
     if not dest_loc:
         raise HTTPException(
@@ -219,7 +218,6 @@ def create_receipt(receipt_in: schemas.ReceiptCreate, db: Session = Depends(get_
             detail=f"Destination location with ID {receipt_in.destination_location_id} not found.",
         )
 
-    # Verify each product exists
     for line in receipt_in.lines:
         prod = db.query(models.Product).filter(models.Product.id == line.product_id).first()
         if not prod:
@@ -228,9 +226,9 @@ def create_receipt(receipt_in: schemas.ReceiptCreate, db: Session = Depends(get_
                 detail=f"Product with ID {line.product_id} not found.",
             )
 
-    # Generate unique sequential operation reference (e.g. REC-00001)
-    total_ops = db.query(models.Operation).count()
-    ref_idx = total_ops + 1
+    # Generate unique sequential operation reference for receipts
+    total_receipts = db.query(models.Operation).filter(models.Operation.operation_type == "receipt").count()
+    ref_idx = total_receipts + 1
     reference = f"REC-{ref_idx:05d}"
     while db.query(models.Operation).filter(models.Operation.reference == reference).first():
         ref_idx += 1
@@ -260,20 +258,89 @@ def create_receipt(receipt_in: schemas.ReceiptCreate, db: Session = Depends(get_
 
 
 @app.post(
+    "/operations/deliveries",
+    response_model=schemas.OperationResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Operations"],
+    summary="Create a Draft delivery order operation",
+)
+def create_delivery(delivery_in: schemas.DeliveryCreate, db: Session = Depends(get_db)):
+    """
+    Create a Draft delivery order with customer/contact, source_location_id,
+    scheduled_date, and one or more lines with product_id and positive quantity.
+    """
+    source_loc = db.query(models.Location).filter(models.Location.id == delivery_in.source_location_id).first()
+    if not source_loc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Source location with ID {delivery_in.source_location_id} not found.",
+        )
+
+    for line in delivery_in.lines:
+        prod = db.query(models.Product).filter(models.Product.id == line.product_id).first()
+        if not prod:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Product with ID {line.product_id} not found.",
+            )
+
+    # Generate unique sequential operation reference for deliveries
+    total_deliveries = db.query(models.Operation).filter(models.Operation.operation_type == "delivery").count()
+    ref_idx = total_deliveries + 1
+    reference = f"DEL-{ref_idx:05d}"
+    while db.query(models.Operation).filter(models.Operation.reference == reference).first():
+        ref_idx += 1
+        reference = f"DEL-{ref_idx:05d}"
+
+    operation = models.Operation(
+        reference=reference,
+        operation_type="delivery",
+        status="draft",
+        customer=delivery_in.customer,
+        source_location_id=delivery_in.source_location_id,
+        scheduled_date=delivery_in.scheduled_date or datetime.now(timezone.utc),
+    )
+    db.add(operation)
+    db.flush()
+
+    for line in delivery_in.lines:
+        op_line = models.OperationLine(
+            operation_id=operation.id,
+            product_id=line.product_id,
+            quantity=line.quantity,
+        )
+        db.add(op_line)
+
+    db.commit()
+    db.refresh(operation)
+    return operation
+
+
+@app.post(
     "/operations/{id}/validate",
     response_model=schemas.OperationResponse,
     tags=["Operations"],
-    summary="Validate a Draft receipt operation",
+    summary="Validate a Draft operation (Receipt or Delivery)",
 )
 def validate_operation(id: int, db: Session = Depends(get_db)):
     """
-    Validate a Draft receipt operation using a database transaction:
+    Validate a Draft operation using a single database transaction.
+
+    For Receipts:
     1. Create or update StockLevel for every product at the destination location.
     2. Increase quantity by the received amount.
-    3. Create an immutable StockLedgerEntry for every line with a positive delta,
-       timestamp, operation reference, location, and balance_after.
+    3. Create immutable StockLedgerEntry for every line with positive delta and balance_after.
     4. Change receipt status to Done.
-    5. Reject validation if it was already validated.
+
+    For Deliveries:
+    1. Check stock availability for every line before changing any stock.
+    2. If any product has insufficient stock, return a clear 422 error showing product,
+       requested quantity, and available quantity. Do not change any data.
+    3. If all lines are available, decrease StockLevel at the source location.
+    4. Create immutable StockLedgerEntry records with negative deltas and balance_after.
+    5. Mark the delivery Done.
+
+    Both reject validating an already Done or non-draft operation.
     """
     operation = db.query(models.Operation).filter(models.Operation.id == id).first()
     if not operation:
@@ -301,75 +368,178 @@ def validate_operation(id: int, db: Session = Depends(get_db)):
             detail="Operation has no lines to validate.",
         )
 
-    if not operation.destination_location_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Receipt has no destination location specified.",
-        )
+    now_ts = datetime.now(timezone.utc)
 
-    dest_location = db.query(models.Location).filter(models.Location.id == operation.destination_location_id).first()
-    if not dest_location:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Destination location with ID {operation.destination_location_id} does not exist.",
-        )
+    # Case A: Incoming Receipt Validation
+    if operation.operation_type == "receipt":
+        if not operation.destination_location_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Receipt has no destination location specified.",
+            )
 
-    try:
-        now_ts = datetime.now(timezone.utc)
+        dest_location = db.query(models.Location).filter(models.Location.id == operation.destination_location_id).first()
+        if not dest_location:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Destination location with ID {operation.destination_location_id} does not exist.",
+            )
+
+        try:
+            for line in operation.lines:
+                stock_level = (
+                    db.query(models.StockLevel)
+                    .filter(
+                        models.StockLevel.product_id == line.product_id,
+                        models.StockLevel.location_id == operation.destination_location_id,
+                    )
+                    .first()
+                )
+                if not stock_level:
+                    product = db.query(models.Product).filter(models.Product.id == line.product_id).first()
+                    reorder_threshold = product.reorder_level if product else 10.0
+                    stock_level = models.StockLevel(
+                        product_id=line.product_id,
+                        location_id=operation.destination_location_id,
+                        quantity=line.quantity,
+                        reserved_quantity=0.0,
+                        reorder_threshold=reorder_threshold,
+                    )
+                    db.add(stock_level)
+                    db.flush()
+                    balance_after = stock_level.quantity
+                else:
+                    stock_level.quantity += line.quantity
+                    db.flush()
+                    balance_after = stock_level.quantity
+
+                ledger_entry = models.StockLedgerEntry(
+                    product_id=line.product_id,
+                    location_id=operation.destination_location_id,
+                    operation_id=operation.id,
+                    operation_reference=operation.reference,
+                    delta=line.quantity,
+                    balance_after=balance_after,
+                    timestamp=now_ts,
+                )
+                db.add(ledger_entry)
+
+            operation.status = "done"
+            operation.updated_at = now_ts
+            db.commit()
+            db.refresh(operation)
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Transaction failed during receipt validation: {str(e)}",
+            )
+        return operation
+
+    # Case B: Delivery Order Validation
+    elif operation.operation_type == "delivery":
+        if not operation.source_location_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Delivery order has no source location specified.",
+            )
+
+        source_location = db.query(models.Location).filter(models.Location.id == operation.source_location_id).first()
+        if not source_location:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Source location with ID {operation.source_location_id} does not exist.",
+            )
+
+        # 1. Check stock availability for every line before changing any stock
+        requested_totals = {}
         for line in operation.lines:
-            # 1 & 2: Create or update StockLevel and increase quantity
+            requested_totals[line.product_id] = requested_totals.get(line.product_id, 0.0) + line.quantity
+
+        insufficient_items = []
+        for prod_id, req_qty in requested_totals.items():
             stock_level = (
                 db.query(models.StockLevel)
                 .filter(
-                    models.StockLevel.product_id == line.product_id,
-                    models.StockLevel.location_id == operation.destination_location_id,
+                    models.StockLevel.product_id == prod_id,
+                    models.StockLevel.location_id == operation.source_location_id,
                 )
                 .first()
             )
-            if not stock_level:
-                product = db.query(models.Product).filter(models.Product.id == line.product_id).first()
-                reorder_threshold = product.reorder_level if product else 10.0
-                stock_level = models.StockLevel(
-                    product_id=line.product_id,
-                    location_id=operation.destination_location_id,
-                    quantity=line.quantity,
-                    reserved_quantity=0.0,
-                    reorder_threshold=reorder_threshold,
-                )
-                db.add(stock_level)
-                db.flush()
-                balance_after = stock_level.quantity
-            else:
-                stock_level.quantity += line.quantity
-                db.flush()
-                balance_after = stock_level.quantity
+            available_qty = stock_level.quantity if stock_level else 0.0
+            if available_qty < req_qty:
+                product = db.query(models.Product).filter(models.Product.id == prod_id).first()
+                prod_name = product.name if product else f"Product #{prod_id}"
+                prod_sku = product.sku if product else ""
+                insufficient_items.append({
+                    "product_id": prod_id,
+                    "product_name": prod_name,
+                    "sku": prod_sku,
+                    "requested_quantity": req_qty,
+                    "available_quantity": available_qty,
+                    "shortage": req_qty - available_qty,
+                })
 
-            # 3: Create immutable StockLedgerEntry
-            ledger_entry = models.StockLedgerEntry(
-                product_id=line.product_id,
-                location_id=operation.destination_location_id,
-                operation_id=operation.id,
-                operation_reference=operation.reference,
-                delta=line.quantity,
-                balance_after=balance_after,
-                timestamp=now_ts,
+        # 2. If any product has insufficient stock, return clear 422 error without modifying data
+        if insufficient_items:
+            error_details = [
+                f"'{item['product_name']}' (SKU: {item['sku']}): requested {item['requested_quantity']}, available {item['available_quantity']} (shortage: {item['shortage']})"
+                for item in insufficient_items
+            ]
+            detail_msg = f"Insufficient stock at source location: {'; '.join(error_details)}."
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "message": detail_msg,
+                    "insufficient_items": insufficient_items,
+                },
             )
-            db.add(ledger_entry)
 
-        # 4: Change receipt status to Done
-        operation.status = "done"
-        operation.updated_at = now_ts
+        # 3. If all lines are available, decrease StockLevel and record negative ledger deltas
+        try:
+            for line in operation.lines:
+                stock_level = (
+                    db.query(models.StockLevel)
+                    .filter(
+                        models.StockLevel.product_id == line.product_id,
+                        models.StockLevel.location_id == operation.source_location_id,
+                    )
+                    .first()
+                )
+                stock_level.quantity -= line.quantity
+                db.flush()
+                balance_after = stock_level.quantity
 
-        db.commit()
-        db.refresh(operation)
-    except Exception as e:
-        db.rollback()
+                # 4. Create immutable StockLedgerEntry record with negative delta
+                ledger_entry = models.StockLedgerEntry(
+                    product_id=line.product_id,
+                    location_id=operation.source_location_id,
+                    operation_id=operation.id,
+                    operation_reference=operation.reference,
+                    delta=-line.quantity,
+                    balance_after=balance_after,
+                    timestamp=now_ts,
+                )
+                db.add(ledger_entry)
+
+            # 5. Mark the delivery Done
+            operation.status = "done"
+            operation.updated_at = now_ts
+            db.commit()
+            db.refresh(operation)
+        except Exception as e:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Transaction failed during delivery validation: {str(e)}",
+            )
+        return operation
+
+    else:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Transaction failed during receipt validation: {str(e)}",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown operation type '{operation.operation_type}'.",
         )
-
-    return operation
 
 
 @app.get(
@@ -380,7 +550,8 @@ def validate_operation(id: int, db: Session = Depends(get_db)):
 )
 def list_operations(
     status: Optional[str] = Query(None, description="Filter by status (e.g. draft, done)"),
-    operation_type: Optional[str] = Query(None, description="Filter by operation type (e.g. receipt)"),
+    operation_type: Optional[str] = Query(None, description="Filter by operation type (e.g. receipt, delivery)"),
+    type: Optional[str] = Query(None, description="Alias for operation_type"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
@@ -389,8 +560,9 @@ def list_operations(
     query = db.query(models.Operation)
     if status:
         query = query.filter(models.Operation.status == status.strip().lower())
-    if operation_type:
-        query = query.filter(models.Operation.operation_type == operation_type.strip().lower())
+    op_type = operation_type or type
+    if op_type:
+        query = query.filter(models.Operation.operation_type == op_type.strip().lower())
     return query.order_by(models.Operation.id.desc()).offset(skip).limit(limit).all()
 
 
