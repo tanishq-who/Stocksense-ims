@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppLayout } from './layouts/AppLayout';
 import { DeliveryPage } from './pages/DeliveryPage';
 import { DashboardPage } from './pages/DashboardPage';
+import { ProductsPage } from './pages/ProductsPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 
 export const App: React.FC = () => {
@@ -54,17 +55,7 @@ export const App: React.FC = () => {
               />
             }
           />
-          <Route
-            path="/products"
-            element={
-              <PlaceholderPage
-                title="Product Catalog & SKUs"
-                section="Inventory"
-                description="Manage master catalog items, barcode tracking, safety stock levels, and valuations."
-                icon="category"
-              />
-            }
-          />
+          <Route path="/products" element={<ProductsPage />} />
           <Route
             path="/move-history"
             element={
