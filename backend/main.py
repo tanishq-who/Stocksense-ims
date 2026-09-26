@@ -1,8 +1,11 @@
+import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import jwt
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -10,6 +13,15 @@ from sqlalchemy.orm import Session
 from database import get_db, init_db
 import models
 import schemas
+from auth_utils import (
+    hash_password,
+    verify_password,
+    hash_otp,
+    verify_otp,
+    generate_6digit_otp,
+    create_access_token,
+    decode_access_token,
+)
 
 
 @asynccontextmanager
@@ -40,6 +52,282 @@ app.add_middleware(
 def get_health():
     """Health check endpoint returning service status."""
     return {"status": "ok"}
+
+
+# Authentication Dependencies and Security
+security = HTTPBearer(auto_error=False)
+
+
+def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: Session = Depends(get_db),
+) -> models.User:
+    """Dependency that decodes Bearer JWT token and retrieves active authenticated User."""
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication credentials were not provided.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = credentials.credentials
+    try:
+        payload = decode_access_token(token)
+        user_id = payload.get("sub") or payload.get("user_id")
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication token payload.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication token has expired. Please log in again.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = db.query(models.User).filter(models.User.id == int(user_id)).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User associated with this token no longer exists.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
+
+# Authentication Endpoints
+@app.post(
+    "/auth/signup",
+    response_model=schemas.UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Authentication"],
+    summary="Register a new user account",
+)
+@app.post(
+    "/api/auth/signup",
+    response_model=schemas.UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
+def signup(signup_in: schemas.UserSignup, db: Session = Depends(get_db)):
+    """
+    Register a new user account with secure password hashing.
+    Validates email format and password strength (>=8 chars, 1 uppercase, 1 lowercase, 1 digit).
+    """
+    clean_email = signup_in.email.strip().lower()
+    existing_user = db.query(models.User).filter(func.lower(models.User.email) == clean_email).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"User with email '{signup_in.email}' is already registered.",
+        )
+
+    pwd_hash = hash_password(signup_in.password)
+    user = models.User(
+        name=signup_in.name.strip(),
+        email=clean_email,
+        password_hash=pwd_hash,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@app.post(
+    "/auth/login",
+    response_model=schemas.LoginResponse,
+    tags=["Authentication"],
+    summary="Authenticate user and return a JWT access token",
+)
+@app.post(
+    "/api/auth/login",
+    response_model=schemas.LoginResponse,
+    include_in_schema=False,
+)
+def login(login_in: schemas.UserLogin, db: Session = Depends(get_db)):
+    """
+    Authenticate user using email and password.
+    Returns a signed JWT access token upon successful credentials verification.
+    """
+    clean_email = login_in.email.strip().lower()
+    user = db.query(models.User).filter(func.lower(models.User.email) == clean_email).first()
+    if not user or not verify_password(login_in.password, user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    access_token = create_access_token(
+        data={"sub": str(user.id), "email": user.email, "name": user.name}
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user,
+    }
+
+
+@app.get(
+    "/auth/me",
+    response_model=schemas.UserResponse,
+    tags=["Authentication"],
+    summary="Get current authenticated user profile",
+)
+@app.get(
+    "/api/auth/me",
+    response_model=schemas.UserResponse,
+    include_in_schema=False,
+)
+def get_me(current_user: models.User = Depends(get_current_user)):
+    """
+    Retrieve current authenticated user based on JWT Bearer token in Authorization header.
+    """
+    return current_user
+
+
+@app.post(
+    "/auth/password-reset/request",
+    response_model=schemas.PasswordResetRequestResponse,
+    tags=["Authentication"],
+    summary="Request a 6-digit password reset OTP",
+)
+@app.post(
+    "/api/auth/password-reset/request",
+    response_model=schemas.PasswordResetRequestResponse,
+    include_in_schema=False,
+)
+def request_password_reset(req_in: schemas.PasswordResetRequest, db: Session = Depends(get_db)):
+    """
+    Generate a secure 6-digit OTP, store only its bcrypt hash with a 10-minute expiry,
+    and invalidate earlier unused OTPs for this user.
+    For local development testing, returns dev OTP in the response when DEBUG setting is true.
+    """
+    clean_email = req_in.email.strip().lower()
+    user = db.query(models.User).filter(func.lower(models.User.email) == clean_email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with email '{req_in.email}' not found.",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+
+    # Invalidate earlier unused OTPs for this user
+    db.query(models.PasswordResetOTP).filter(
+        models.PasswordResetOTP.user_id == user.id,
+        models.PasswordResetOTP.used_at.is_(None),
+    ).update({"used_at": now_utc})
+
+    # Generate cryptographically secure 6-digit OTP
+    otp_code = generate_6digit_otp()
+    code_hash = hash_otp(otp_code)
+    expires_at = now_utc + timedelta(minutes=10)
+
+    otp_record = models.PasswordResetOTP(
+        user_id=user.id,
+        code_hash=code_hash,
+        expires_at=expires_at,
+        used_at=None,
+        created_at=now_utc,
+    )
+    db.add(otp_record)
+    db.commit()
+
+    is_debug = os.getenv("DEBUG", "true").lower() in ("true", "1", "yes") or os.getenv("STOCKSENSE_ENV", "development").lower() in ("dev", "development")
+    dev_otp = otp_code if is_debug else None
+
+    return {
+        "message": "Password reset OTP generated successfully. It will expire in 10 minutes.",
+        "expires_in_minutes": 10,
+        "dev_otp": dev_otp,
+        "otp": dev_otp,
+    }
+
+
+@app.post(
+    "/auth/password-reset/verify",
+    response_model=schemas.AuthMessageResponse,
+    tags=["Authentication"],
+    summary="Verify OTP and securely update user password",
+)
+@app.post(
+    "/api/auth/password-reset/verify",
+    response_model=schemas.AuthMessageResponse,
+    include_in_schema=False,
+)
+def verify_password_reset(verify_in: schemas.PasswordResetVerify, db: Session = Depends(get_db)):
+    """
+    Verify 6-digit OTP and reset password.
+    Rejects expired, incorrect, or reused OTPs and updates password securely.
+    """
+    clean_email = verify_in.email.strip().lower()
+    user = db.query(models.User).filter(func.lower(models.User.email) == clean_email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with email '{verify_in.email}' not found.",
+        )
+
+    now_utc = datetime.now(timezone.utc)
+
+    # Look up active (unused) OTP for this user
+    active_otps = (
+        db.query(models.PasswordResetOTP)
+        .filter(
+            models.PasswordResetOTP.user_id == user.id,
+            models.PasswordResetOTP.used_at.is_(None),
+        )
+        .order_by(models.PasswordResetOTP.id.desc())
+        .all()
+    )
+
+    if not active_otps:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active password reset request found. Code may have already been used or invalidated. Please request a new code.",
+        )
+
+    otp_record = active_otps[0]
+
+    # Check expiration
+    expires_at = otp_record.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if now_utc > expires_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password reset code has expired. Codes are only valid for 10 minutes. Please request a new code.",
+        )
+
+    # Check OTP correctness
+    if not verify_otp(verify_in.otp.strip(), otp_record.code_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid password reset code.",
+        )
+
+    # Mark OTP as used (prevent reuse)
+    otp_record.used_at = now_utc
+
+    # Update password securely
+    user.password_hash = hash_password(verify_in.new_password)
+    user.updated_at = now_utc
+
+    db.commit()
+
+    return {
+        "message": "Password has been reset successfully. You can now log in with your new password.",
+    }
 
 
 # Product Endpoints

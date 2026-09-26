@@ -28,6 +28,7 @@ def get_db():
 
 def init_db():
     """Initializes all database tables registered in SQLAlchemy models and migrates schema if needed."""
+    import models  # noqa: F401 - ensure models are registered on Base.metadata
     Base.metadata.create_all(bind=engine)
     with engine.connect() as conn:
         # Migrate products columns if needed

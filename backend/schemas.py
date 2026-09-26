@@ -304,3 +304,103 @@ class DashboardResponse(BaseModel):
     total_inventory_quantity: Optional[float] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+# Authentication Schemas
+class UserSignup(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255, description="Full name (required)")
+    email: str = Field(..., description="Valid email address (required, unique)")
+    password: str = Field(..., min_length=8, description="Secure password (at least 8 chars, 1 uppercase, 1 lowercase, 1 digit)")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Name is required and cannot be empty or whitespace.")
+        return value.strip()
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        from auth_utils import validate_email_str
+        return validate_email_str(value)
+
+    @field_validator("password")
+    @classmethod
+    def validate_pwd(cls, value: str) -> str:
+        from auth_utils import validate_password_strength
+        return validate_password_strength(value)
+
+
+class UserLogin(BaseModel):
+    email: str = Field(..., description="Registered email address")
+    password: str = Field(..., description="Account password")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        from auth_utils import validate_email_str
+        return validate_email_str(value)
+
+
+class UserResponse(BaseModel):
+    id: int
+    name: str
+    email: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(..., description="Registered email address")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        from auth_utils import validate_email_str
+        return validate_email_str(value)
+
+
+class PasswordResetRequestResponse(BaseModel):
+    message: str
+    expires_in_minutes: int = 10
+    dev_otp: Optional[str] = None
+    otp: Optional[str] = None
+
+
+class PasswordResetVerify(BaseModel):
+    email: str = Field(..., description="Registered email address")
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit OTP code")
+    new_password: str = Field(..., min_length=8, description="New secure password")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        from auth_utils import validate_email_str
+        return validate_email_str(value)
+
+    @field_validator("otp")
+    @classmethod
+    def validate_otp_code(cls, value: str) -> str:
+        v = value.strip()
+        if not v.isdigit() or len(v) != 6:
+            raise ValueError("OTP must be a 6-digit numeric code.")
+        return v
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_pwd(cls, value: str) -> str:
+        from auth_utils import validate_password_strength
+        return validate_password_strength(value)
+
+
+class AuthMessageResponse(BaseModel):
+    message: str
+

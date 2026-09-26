@@ -25,7 +25,8 @@ def run_tests():
     print("Endpoints successfully registered in OpenAPI specification!")
 
     print("\n=== 3. Setup Test Warehouse and Locations ===")
-    ts = Path('.').stat().st_mtime_ns % 100000
+    import uuid
+    ts = uuid.uuid4().hex[:8]
     wh_res = client.post("/api/warehouses", json={
         "name": f"Dashboard Test WH {ts}",
         "code": f"WH-DASH-{ts}",

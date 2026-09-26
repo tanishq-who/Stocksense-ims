@@ -84,6 +84,21 @@ The SQLite database (`stocksense.db`) defines relational models for real-time in
    - `reason`: Audit reason string copied from the validated operation
    - `timestamp`: UTC timestamp of the transaction
 
+8. **`User`**:
+   - `id`: Primary key
+   - `name`: User full name
+   - `email`: Unique email address (normalized to lowercase)
+   - `password_hash`: Secure bcrypt hash (plain passwords never stored)
+   - `created_at` / `updated_at`: Timestamps
+
+9. **`PasswordResetOTP`**:
+   - `id`: Primary key
+   - `user_id`: Foreign key to `users.id` (cascading delete)
+   - `code_hash`: Secure bcrypt hash of the 6-digit OTP (plain OTPs never stored in DB)
+   - `expires_at`: Expiration timestamp (10 minutes from creation)
+   - `used_at`: Timestamp when the OTP was successfully consumed or invalidated
+   - `created_at`: Timestamp of generation
+
 ---
 
 ## Getting Started
@@ -263,3 +278,32 @@ The server starts at `http://127.0.0.1:8000`.
     - `skip`: Pagination offset (default: 0)
     - `limit`: Pagination limit (default: 100, max: 500)
   - Returns a list of alert items or an empty list `[]` when no alerts exist.
+
+### Authentication & Account Security
+
+All authentication operations use salted **bcrypt** password/OTP hashing and standards-compliant **JWT** Bearer tokens.
+
+#### Endpoints
+- **`POST /auth/signup`**:
+  - Registers a new user.
+  - Body: `{"name": "...", "email": "...", "password": "..."}`
+  - Password rules: minimum 8 characters, at least 1 uppercase (A-Z), 1 lowercase (a-z), and 1 digit (0-9).
+  - Enforces email uniqueness across registered accounts.
+- **`POST /auth/login`**:
+  - Authenticates user credentials.
+  - Body: `{"email": "...", "password": "..."}`
+  - Returns: `{"access_token": "<jwt>", "token_type": "bearer", "user": {...}}`
+- **`GET /auth/me`**:
+  - Retrieves current authenticated user profile.
+  - Header: `Authorization: Bearer <jwt_access_token>`
+  - Returns `401 Unauthorized` if token is missing, expired, or invalid.
+- **`POST /auth/password-reset/request`**:
+  - Generates a cryptographically secure 6-digit OTP.
+  - Automatically invalidates any earlier unused OTPs for the user.
+  - Stores only the bcrypt hash of the OTP with a 10-minute expiration.
+  - In development mode (`DEBUG=true`), returns the development OTP in the response for hackathon testing.
+- **`POST /auth/password-reset/verify`**:
+  - Body: `{"email": "...", "otp": "123456", "new_password": "..."}`
+  - Rejects expired, incorrect, or previously consumed OTPs with `400 Bad Request`.
+  - Updates the user's password securely with bcrypt and marks the OTP as used.
+
