@@ -72,6 +72,10 @@ class Location(Base):
         server_default=func.now(),
     )
 
+    __table_args__ = (
+        UniqueConstraint("warehouse_id", "name", name="uq_location_warehouse_name"),
+    )
+
     warehouse = relationship("Warehouse", back_populates="locations")
     stock_levels = relationship("StockLevel", back_populates="location", cascade="all, delete-orphan")
 

@@ -64,4 +64,10 @@ def init_db():
         if ledger_columns and "reason" not in ledger_columns:
             conn.execute(text("ALTER TABLE stock_ledger_entries ADD COLUMN reason VARCHAR"))
 
+        # Ensure unique index for location name within warehouse
+        try:
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_location_warehouse_name ON locations (warehouse_id, name)"))
+        except Exception:
+            pass
+
         conn.commit()

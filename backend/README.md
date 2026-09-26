@@ -238,10 +238,49 @@ The server starts at `http://127.0.0.1:8000`.
 - **`GET /products/{id}`**: Retrieve single product.
 - **`PATCH /products/{id}`**: Partially update product.
 
-### Warehouses, Locations & Stock Levels
-- **Warehouses**: `POST /api/warehouses`, `GET /api/warehouses`, `GET /api/warehouses/{id}`
-- **Locations**: `POST /api/locations`, `GET /api/locations`, `GET /api/locations/{id}`
-- **Stock Levels**: `POST /api/stock-levels`, `GET /api/stock-levels`, `GET /api/stock-levels/{id}`
+### Warehouse & Location Management APIs
+
+#### Warehouses
+- **`GET /warehouses`** (also `GET /api/warehouses`):
+  - List all warehouses with dynamic `locations_count` and optional search (`search`, `is_active`, `skip`, `limit`).
+- **`POST /warehouses`** (also `POST /api/warehouses`):
+  - Create a warehouse.
+  - Body: `{"name": "Central Hub", "code": "WH-CENTRAL", "address": "...", "is_active": true}`
+  - Validation: `name` is required and must be unique (returns `400 Bad Request` if duplicate).
+  - `code` is auto-generated if omitted or verified unique if provided.
+- **`GET /warehouses/{id}`** (also `GET /api/warehouses/{id}`):
+  - Retrieve single warehouse by ID (returns `404 Not Found` if missing).
+- **`PATCH /warehouses/{id}`** (also `PATCH /api/warehouses/{id}`):
+  - Partially update warehouse name, code, address, or active status.
+  - Validates warehouse existence (`404`) and unique name/code constraints across other warehouses (`400`).
+- **`GET /warehouses/{id}/locations`** (also `GET /api/warehouses/{id}/locations`):
+  - Retrieve all locations belonging to a specific warehouse.
+  - Returns `404 Not Found` if warehouse does not exist.
+  - Includes real-time stock summary for each location (`total_quantity` and `products_in_stock_count`).
+
+#### Locations
+- **`GET /locations`** (also `GET /api/locations`):
+  - List all locations with dynamic stock summaries (supports `warehouse_id`, `search`, `skip`, `limit`).
+- **`POST /locations`** (also `POST /api/locations`):
+  - Create a location inside a warehouse.
+  - Body: `{"warehouse_id": 1, "name": "Zone A", "code": "LOC-A1", "location_type": "internal"}`
+  - Validation:
+    - Location `name` is required.
+    - Every location must belong to an existing warehouse (returns `404 Not Found` if `warehouse_id` does not exist).
+    - Location name must be unique within its warehouse (returns `400 Bad Request` if duplicate; same name in different warehouse is permitted).
+  - Response includes location details and initial zero stock summary.
+- **`GET /locations/{id}`** (also `GET /api/locations/{id}`):
+  - Retrieve location details with dynamic stock summary (`total_quantity`, `products_in_stock_count`, `total_products_in_stock`).
+  - Returns `404 Not Found` if missing.
+- **`PATCH /locations/{id}`** (also `PATCH /api/locations/{id}`):
+  - Partially update location attributes (e.g. `name`, `warehouse_id`, `code`, `location_type`).
+  - Validates location existence (`404`), parent warehouse existence (`404`), and within-warehouse name uniqueness (`400`).
+  - Returns updated location with dynamic stock summary.
+
+#### Stock Levels
+- **`POST /api/stock-levels`**: Record initial stock level.
+- **`GET /api/stock-levels`**: Query stock levels with filters.
+- **`GET /api/stock-levels/{id}`**: Query single stock level.
 
 ### Dashboard & Inventory Alerts
 

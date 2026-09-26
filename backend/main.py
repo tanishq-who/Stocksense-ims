@@ -1,4 +1,5 @@
 import os
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -1667,72 +1668,514 @@ def get_low_stock_alerts(
     return alerts[skip : skip + limit]
 
 
+# Helper functions for Warehouse and Location responses
+def build_warehouse_responses(warehouses: List[models.Warehouse], db: Session) -> List[schemas.WarehouseResponse]:
+    if not warehouses:
+        return []
+    wh_ids = [wh.id for wh in warehouses]
+    counts = dict(
+        db.query(models.Location.warehouse_id, func.count(models.Location.id))
+        .filter(models.Location.warehouse_id.in_(wh_ids))
+        .group_by(models.Location.warehouse_id)
+        .all()
+    )
+    results = []
+    for wh in warehouses:
+        loc_count = counts.get(wh.id, 0)
+        results.append(
+            schemas.WarehouseResponse(
+                id=wh.id,
+                name=wh.name,
+                code=wh.code,
+                address=wh.address,
+                is_active=wh.is_active,
+                locations_count=loc_count,
+                created_at=wh.created_at,
+                updated_at=wh.updated_at,
+            )
+        )
+    return results
+
+
+def compute_warehouse_response(warehouse: models.Warehouse, db: Session) -> schemas.WarehouseResponse:
+    return build_warehouse_responses([warehouse], db)[0]
+
+
+def build_location_responses(locations: List[models.Location], db: Session) -> List[schemas.LocationResponse]:
+    if not locations:
+        return []
+    loc_ids = [loc.id for loc in locations]
+    stock_levels = db.query(models.StockLevel).filter(models.StockLevel.location_id.in_(loc_ids)).all()
+    stock_by_loc: dict = {}
+    for sl in stock_levels:
+        stock_by_loc.setdefault(sl.location_id, []).append(sl)
+
+    results = []
+    for loc in locations:
+        levels = stock_by_loc.get(loc.id, [])
+        total_qty = sum(sl.quantity for sl in levels)
+        in_stock_count = sum(1 for sl in levels if sl.quantity > 0)
+        total_prods = len(levels)
+        summary = schemas.LocationStockSummary(
+            total_quantity=total_qty,
+            products_in_stock_count=in_stock_count,
+            total_products=total_prods,
+        )
+        results.append(
+            schemas.LocationResponse(
+                id=loc.id,
+                warehouse_id=loc.warehouse_id,
+                name=loc.name,
+                code=loc.code,
+                location_type=loc.location_type,
+                total_quantity=total_qty,
+                products_in_stock_count=in_stock_count,
+                total_products_in_stock=in_stock_count,
+                stock_summary=summary,
+                created_at=loc.created_at,
+                updated_at=loc.updated_at,
+            )
+        )
+    return results
+
+
+def compute_location_response(location: models.Location, db: Session) -> schemas.LocationResponse:
+    return build_location_responses([location], db)[0]
+
+
 # Warehouse Endpoints
-@app.post("/api/warehouses", response_model=schemas.WarehouseResponse, status_code=status.HTTP_201_CREATED, tags=["Warehouses"])
+@app.post(
+    "/warehouses",
+    response_model=schemas.WarehouseResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Warehouses"],
+    summary="Create a new warehouse",
+)
+@app.post(
+    "/api/warehouses",
+    response_model=schemas.WarehouseResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
 def create_warehouse(warehouse_in: schemas.WarehouseCreate, db: Session = Depends(get_db)):
-    """Create a new warehouse."""
-    existing = (
+    """
+    Create a new warehouse.
+    - Name is required and must be unique.
+    - Code is unique if provided, or generated automatically.
+    """
+    clean_name = warehouse_in.name.strip()
+    existing_name = (
         db.query(models.Warehouse)
-        .filter((models.Warehouse.code == warehouse_in.code) | (models.Warehouse.name == warehouse_in.name))
+        .filter(func.lower(models.Warehouse.name) == clean_name.lower())
         .first()
     )
-    if existing:
+    if existing_name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Warehouse with this name or code already exists.",
+            detail=f"Warehouse with name '{clean_name}' already exists. Warehouse name must be unique.",
         )
-    warehouse = models.Warehouse(**warehouse_in.model_dump())
+
+    if warehouse_in.code and warehouse_in.code.strip():
+        code = warehouse_in.code.strip().upper()
+        existing_code = (
+            db.query(models.Warehouse)
+            .filter(func.lower(models.Warehouse.code) == code.lower())
+            .first()
+        )
+        if existing_code:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Warehouse with code '{code}' already exists. Code must be unique.",
+            )
+    else:
+        # Generate automatic code
+        code = f"WH-{uuid.uuid4().hex[:6].upper()}"
+        while db.query(models.Warehouse).filter(models.Warehouse.code == code).first():
+            code = f"WH-{uuid.uuid4().hex[:6].upper()}"
+
+    warehouse = models.Warehouse(
+        name=clean_name,
+        code=code,
+        address=warehouse_in.address,
+        is_active=warehouse_in.is_active,
+    )
     db.add(warehouse)
-    db.commit()
-    db.refresh(warehouse)
-    return warehouse
+    try:
+        db.commit()
+        db.refresh(warehouse)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Integrity violation while creating warehouse.",
+        )
+    return compute_warehouse_response(warehouse, db)
 
 
-@app.get("/api/warehouses", response_model=List[schemas.WarehouseResponse], tags=["Warehouses"])
-def list_warehouses(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """List all warehouses."""
-    return db.query(models.Warehouse).offset(skip).limit(limit).all()
+@app.get(
+    "/warehouses",
+    response_model=List[schemas.WarehouseResponse],
+    tags=["Warehouses"],
+    summary="List all warehouses",
+)
+@app.get(
+    "/api/warehouses",
+    response_model=List[schemas.WarehouseResponse],
+    include_in_schema=False,
+)
+def list_warehouses(
+    search: Optional[str] = Query(None, description="Search warehouses by name, code, or address"),
+    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """List all warehouses with location counts and optional search."""
+    query = db.query(models.Warehouse)
+    if is_active is not None:
+        query = query.filter(models.Warehouse.is_active == is_active)
+    if search and search.strip():
+        pat = f"%{search.strip()}%"
+        query = query.filter(
+            (models.Warehouse.name.ilike(pat))
+            | (models.Warehouse.code.ilike(pat))
+            | (models.Warehouse.address.ilike(pat))
+        )
+    warehouses = query.order_by(models.Warehouse.id.asc()).offset(skip).limit(limit).all()
+    return build_warehouse_responses(warehouses, db)
 
 
-@app.get("/api/warehouses/{warehouse_id}", response_model=schemas.WarehouseResponse, tags=["Warehouses"])
-def get_warehouse(warehouse_id: int, db: Session = Depends(get_db)):
-    """Get warehouse by ID."""
-    warehouse = db.query(models.Warehouse).filter(models.Warehouse.id == warehouse_id).first()
+@app.get(
+    "/warehouses/{id}",
+    response_model=schemas.WarehouseResponse,
+    tags=["Warehouses"],
+    summary="Get warehouse by ID",
+)
+@app.get(
+    "/api/warehouses/{id}",
+    response_model=schemas.WarehouseResponse,
+    include_in_schema=False,
+)
+def get_warehouse(id: int, db: Session = Depends(get_db)):
+    """Retrieve details for a specific warehouse by its ID."""
+    warehouse = db.query(models.Warehouse).filter(models.Warehouse.id == id).first()
     if not warehouse:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Warehouse not found")
-    return warehouse
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Warehouse with ID {id} not found.",
+        )
+    return compute_warehouse_response(warehouse, db)
+
+
+@app.patch(
+    "/warehouses/{id}",
+    response_model=schemas.WarehouseResponse,
+    tags=["Warehouses"],
+    summary="Update warehouse by ID",
+)
+@app.patch(
+    "/api/warehouses/{id}",
+    response_model=schemas.WarehouseResponse,
+    include_in_schema=False,
+)
+def patch_warehouse(id: int, warehouse_in: schemas.WarehouseUpdate, db: Session = Depends(get_db)):
+    """
+    Partially update a warehouse.
+    - Validates warehouse exists (404).
+    - If name is updated, validates uniqueness (400).
+    - If code is updated, validates uniqueness (400).
+    """
+    warehouse = db.query(models.Warehouse).filter(models.Warehouse.id == id).first()
+    if not warehouse:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Warehouse with ID {id} not found.",
+        )
+
+    update_data = warehouse_in.model_dump(exclude_unset=True)
+    if not update_data:
+        return compute_warehouse_response(warehouse, db)
+
+    if "name" in update_data and update_data["name"] is not None:
+        clean_name = update_data["name"].strip()
+        existing = (
+            db.query(models.Warehouse)
+            .filter(
+                func.lower(models.Warehouse.name) == clean_name.lower(),
+                models.Warehouse.id != id,
+            )
+            .first()
+        )
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Warehouse with name '{clean_name}' already exists. Warehouse name must be unique.",
+            )
+        update_data["name"] = clean_name
+
+    if "code" in update_data and update_data["code"] is not None:
+        clean_code = update_data["code"].strip().upper()
+        existing = (
+            db.query(models.Warehouse)
+            .filter(
+                func.lower(models.Warehouse.code) == clean_code.lower(),
+                models.Warehouse.id != id,
+            )
+            .first()
+        )
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Warehouse with code '{clean_code}' already exists. Code must be unique.",
+            )
+        update_data["code"] = clean_code
+
+    for key, val in update_data.items():
+        setattr(warehouse, key, val)
+
+    try:
+        db.commit()
+        db.refresh(warehouse)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Integrity violation while updating warehouse.",
+        )
+    return compute_warehouse_response(warehouse, db)
+
+
+@app.get(
+    "/warehouses/{id}/locations",
+    response_model=List[schemas.LocationResponse],
+    tags=["Warehouses"],
+    summary="Get all locations belonging to a warehouse with stock summary",
+)
+@app.get(
+    "/api/warehouses/{id}/locations",
+    response_model=List[schemas.LocationResponse],
+    include_in_schema=False,
+)
+def get_warehouse_locations(
+    id: int,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """
+    Retrieve all locations belonging to a specific warehouse.
+    Includes location stock summary (total quantity and count of products in stock).
+    Returns 404 if warehouse does not exist.
+    """
+    warehouse = db.query(models.Warehouse).filter(models.Warehouse.id == id).first()
+    if not warehouse:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Warehouse with ID {id} not found.",
+        )
+
+    locations = (
+        db.query(models.Location)
+        .filter(models.Location.warehouse_id == id)
+        .order_by(models.Location.id.asc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return build_location_responses(locations, db)
 
 
 # Location Endpoints
-@app.post("/api/locations", response_model=schemas.LocationResponse, status_code=status.HTTP_201_CREATED, tags=["Locations"])
+@app.post(
+    "/locations",
+    response_model=schemas.LocationResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Locations"],
+    summary="Create a new location inside a warehouse",
+)
+@app.post(
+    "/api/locations",
+    response_model=schemas.LocationResponse,
+    status_code=status.HTTP_201_CREATED,
+    include_in_schema=False,
+)
 def create_location(location_in: schemas.LocationCreate, db: Session = Depends(get_db)):
-    """Create a new location inside a warehouse."""
+    """
+    Create a new location.
+    - Every location must belong to an existing warehouse (returns 404 if not found).
+    - Location name is required and must be unique within its warehouse (returns 400 if duplicate).
+    - Returns location details including initial stock summary.
+    """
     warehouse = db.query(models.Warehouse).filter(models.Warehouse.id == location_in.warehouse_id).first()
     if not warehouse:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Warehouse not found")
-    location = models.Location(**location_in.model_dump())
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Warehouse with ID {location_in.warehouse_id} not found. Every location must belong to an existing warehouse.",
+        )
+
+    clean_name = location_in.name.strip()
+    existing_loc = (
+        db.query(models.Location)
+        .filter(
+            models.Location.warehouse_id == location_in.warehouse_id,
+            func.lower(models.Location.name) == clean_name.lower(),
+        )
+        .first()
+    )
+    if existing_loc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Location with name '{clean_name}' already exists in warehouse '{warehouse.name}' (ID {location_in.warehouse_id}). Location name must be unique within its warehouse.",
+        )
+
+    loc_dict = location_in.model_dump()
+    loc_dict["name"] = clean_name
+    if not loc_dict.get("code"):
+        loc_dict["code"] = f"LOC-{clean_name[:4].upper()}-{uuid.uuid4().hex[:4].upper()}"
+
+    location = models.Location(**loc_dict)
     db.add(location)
-    db.commit()
-    db.refresh(location)
-    return location
+    try:
+        db.commit()
+        db.refresh(location)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Location with name '{clean_name}' already exists in warehouse ID {location_in.warehouse_id}.",
+        )
+    return compute_location_response(location, db)
 
 
-@app.get("/api/locations", response_model=List[schemas.LocationResponse], tags=["Locations"])
-def list_locations(warehouse_id: int = None, skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
-    """List locations, optionally filtered by warehouse."""
+@app.get(
+    "/locations",
+    response_model=List[schemas.LocationResponse],
+    tags=["Locations"],
+    summary="List all locations with stock summaries",
+)
+@app.get(
+    "/api/locations",
+    response_model=List[schemas.LocationResponse],
+    include_in_schema=False,
+)
+def list_locations(
+    warehouse_id: Optional[int] = Query(None, description="Filter locations by parent warehouse ID"),
+    search: Optional[str] = Query(None, description="Search locations by name or code"),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """List locations, optionally filtered by warehouse, including stock summaries."""
     query = db.query(models.Location)
     if warehouse_id is not None:
         query = query.filter(models.Location.warehouse_id == warehouse_id)
-    return query.offset(skip).limit(limit).all()
+    if search and search.strip():
+        pat = f"%{search.strip()}%"
+        query = query.filter(
+            (models.Location.name.ilike(pat)) | (models.Location.code.ilike(pat))
+        )
+    locations = query.order_by(models.Location.id.asc()).offset(skip).limit(limit).all()
+    return build_location_responses(locations, db)
 
 
-@app.get("/api/locations/{location_id}", response_model=schemas.LocationResponse, tags=["Locations"])
-def get_location(location_id: int, db: Session = Depends(get_db)):
-    """Get location by ID."""
-    location = db.query(models.Location).filter(models.Location.id == location_id).first()
+@app.get(
+    "/locations/{id}",
+    response_model=schemas.LocationResponse,
+    tags=["Locations"],
+    summary="Get location details with stock summary by ID",
+)
+@app.get(
+    "/api/locations/{id}",
+    response_model=schemas.LocationResponse,
+    include_in_schema=False,
+)
+def get_location(id: int, db: Session = Depends(get_db)):
+    """Retrieve details for a specific location by ID with stock summary."""
+    location = db.query(models.Location).filter(models.Location.id == id).first()
     if not location:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Location not found")
-    return location
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Location with ID {id} not found.",
+        )
+    return compute_location_response(location, db)
+
+
+@app.patch(
+    "/locations/{id}",
+    response_model=schemas.LocationResponse,
+    tags=["Locations"],
+    summary="Update location details by ID",
+)
+@app.patch(
+    "/api/locations/{id}",
+    response_model=schemas.LocationResponse,
+    include_in_schema=False,
+)
+def patch_location(id: int, location_in: schemas.LocationUpdate, db: Session = Depends(get_db)):
+    """
+    Partially update a location.
+    - Validates location exists (404).
+    - If parent warehouse is updated, verifies new warehouse exists (404).
+    - Validates that location name remains unique within the target warehouse (400).
+    - Returns updated location with dynamic stock summary.
+    """
+    location = db.query(models.Location).filter(models.Location.id == id).first()
+    if not location:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Location with ID {id} not found.",
+        )
+
+    update_data = location_in.model_dump(exclude_unset=True)
+    if not update_data:
+        return compute_location_response(location, db)
+
+    target_wh_id = update_data.get("warehouse_id", location.warehouse_id)
+    if "warehouse_id" in update_data and update_data["warehouse_id"] is not None:
+        target_wh = db.query(models.Warehouse).filter(models.Warehouse.id == target_wh_id).first()
+        if not target_wh:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Warehouse with ID {target_wh_id} not found. Every location must belong to an existing warehouse.",
+            )
+
+    target_name = update_data.get("name", location.name)
+    if target_name is not None:
+        target_name = target_name.strip()
+        update_data["name"] = target_name
+
+    # Check uniqueness if name or warehouse_id changed
+    if "name" in update_data or "warehouse_id" in update_data:
+        existing = (
+            db.query(models.Location)
+            .filter(
+                models.Location.warehouse_id == target_wh_id,
+                func.lower(models.Location.name) == target_name.lower(),
+                models.Location.id != id,
+            )
+            .first()
+        )
+        if existing:
+            wh_for_err = db.query(models.Warehouse).filter(models.Warehouse.id == target_wh_id).first()
+            wh_name_str = wh_for_err.name if wh_for_err else str(target_wh_id)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Location with name '{target_name}' already exists in warehouse '{wh_name_str}' (ID {target_wh_id}). Location name must be unique within its warehouse.",
+            )
+
+    for key, val in update_data.items():
+        setattr(location, key, val)
+
+    try:
+        db.commit()
+        db.refresh(location)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Location with name '{target_name}' already exists in warehouse ID {target_wh_id}.",
+        )
+    return compute_location_response(location, db)
 
 
 # StockLevel Endpoints

@@ -61,10 +61,17 @@ class ProductResponse(ProductBase):
 
 # Warehouse Schemas
 class WarehouseBase(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
-    code: str = Field(..., min_length=1, max_length=50)
+    name: str = Field(..., min_length=1, max_length=255, description="Warehouse name (required, unique)")
+    code: Optional[str] = Field(None, max_length=50, description="Warehouse unique identifier code")
     address: Optional[str] = None
     is_active: bool = True
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Warehouse name is required and cannot be empty or whitespace.")
+        return value.strip()
 
 
 class WarehouseCreate(WarehouseBase):
@@ -73,13 +80,27 @@ class WarehouseCreate(WarehouseBase):
 
 class WarehouseUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
-    code: Optional[str] = Field(None, min_length=1, max_length=50)
+    code: Optional[str] = Field(None, max_length=50)
     address: Optional[str] = None
     is_active: Optional[bool] = None
 
+    @field_validator("name")
+    @classmethod
+    def validate_name_if_present(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            if not value.strip():
+                raise ValueError("Warehouse name cannot be empty or whitespace.")
+            return value.strip()
+        return None
 
-class WarehouseResponse(WarehouseBase):
+
+class WarehouseResponse(BaseModel):
     id: int
+    name: str
+    code: str
+    address: Optional[str] = None
+    is_active: bool = True
+    locations_count: Optional[int] = None
     created_at: datetime
     updated_at: datetime
 
@@ -87,11 +108,24 @@ class WarehouseResponse(WarehouseBase):
 
 
 # Location Schemas
+class LocationStockSummary(BaseModel):
+    total_quantity: float = 0.0
+    products_in_stock_count: int = 0
+    total_products: int = 0
+
+
 class LocationBase(BaseModel):
-    warehouse_id: int
-    name: str = Field(..., min_length=1, max_length=255)
+    warehouse_id: int = Field(..., gt=0, description="Parent warehouse ID (required)")
+    name: str = Field(..., min_length=1, max_length=255, description="Location name (required, unique within warehouse)")
     code: Optional[str] = Field(None, max_length=50)
     location_type: str = Field(default="internal", max_length=50)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        if not value or not value.strip():
+            raise ValueError("Location name is required and cannot be empty or whitespace.")
+        return value.strip()
 
 
 class LocationCreate(LocationBase):
@@ -99,14 +133,27 @@ class LocationCreate(LocationBase):
 
 
 class LocationUpdate(BaseModel):
-    warehouse_id: Optional[int] = None
+    warehouse_id: Optional[int] = Field(None, gt=0)
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     code: Optional[str] = Field(None, max_length=50)
     location_type: Optional[str] = Field(None, max_length=50)
 
+    @field_validator("name")
+    @classmethod
+    def validate_name_if_present(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None:
+            if not value.strip():
+                raise ValueError("Location name cannot be empty or whitespace.")
+            return value.strip()
+        return None
+
 
 class LocationResponse(LocationBase):
     id: int
+    total_quantity: float = 0.0
+    products_in_stock_count: int = 0
+    total_products_in_stock: int = 0
+    stock_summary: Optional[LocationStockSummary] = None
     created_at: datetime
     updated_at: datetime
 
