@@ -5,6 +5,7 @@ import { DeliveryPage } from './pages/DeliveryPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ProductsPage } from './pages/ProductsPage';
 import { ReceiptsPage } from './pages/ReceiptsPage';
+import { TransfersPage } from './pages/TransfersPage';
 import { PlaceholderPage } from './pages/PlaceholderPage';
 
 export const App: React.FC = () => {
@@ -21,20 +22,11 @@ export const App: React.FC = () => {
           <Route path="/deliveries" element={<Navigate to="/operations/deliveries" replace />} />
           <Route path="/operations/receipts" element={<ReceiptsPage />} />
           <Route path="/receipts" element={<Navigate to="/operations/receipts" replace />} />
+          <Route path="/operations/transfers" element={<TransfersPage />} />
+          <Route path="/transfers" element={<Navigate to="/operations/transfers" replace />} />
           <Route
             path="/operations"
             element={<Navigate to="/operations/deliveries" replace />}
-          />
-          <Route
-            path="/operations/transfers"
-            element={
-              <PlaceholderPage
-                title="Internal Transfers"
-                section="Operations"
-                description="Move inventory units between aisles, storage zones, cold vaults, and fulfillment docks."
-                icon="swap_horiz"
-              />
-            }
           />
           <Route
             path="/operations/adjustments"
